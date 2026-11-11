@@ -64,17 +64,40 @@ def _get_media_client() -> httpx.AsyncClient:
     return _media_client
 
 
-def _require_write_auth(request: Request) -> None:
-    # 1. If optional static RADAR_ADMIN_PASSWORD is set, verify header
+_verified_admin_tokens: Dict[str, float] = {}
+
+
+async def _require_translate_auth(request: Request) -> None:
     expected_pwd = get_admin_password()
     if expected_pwd:
         provided = (request.headers.get("x-admin-password") or "").strip()
         if not provided or not secrets.compare_digest(provided, expected_pwd):
             raise HTTPException(status_code=401, detail="Admin password required")
 
-    # 2. Require a signed-in admin JWT when running without a server-wide secret key
-    if is_supabase_enabled() and not get_supabase_server_key() and not current_user_jwt.get():
-        raise HTTPException(status_code=401, detail="AUTH_REQUIRED: Admin sign-in required")
+    # On Vercel (even when SUPABASE_SECRET_KEY is injected), strictly verify signed-in admin JWT for translation
+    if IS_VERCEL or (is_supabase_enabled() and not get_supabase_server_key()):
+        tok = (current_user_jwt.get() or "").strip()
+        if not tok:
+            raise HTTPException(status_code=401, detail="AUTH_REQUIRED: Admin sign-in required")
+
+        now = time.time()
+        if _verified_admin_tokens.get(tok, 0.0) <= now:
+            sb_url = get_supabase_url()
+            pub_key = get_supabase_publishable_key() or get_supabase_server_key()
+            if not sb_url or not pub_key:
+                raise HTTPException(status_code=503, detail="Auth service unavailable")
+            async with httpx.AsyncClient(proxy=get_system_proxy(), timeout=10.0) as client:
+                resp = await client.get(
+                    f"{sb_url}/auth/v1/user",
+                    headers={"apikey": pub_key, "Authorization": f"Bearer {tok}"},
+                )
+            if resp.status_code != 200:
+                _verified_admin_tokens.pop(tok, None)
+                raise HTTPException(status_code=401, detail="AUTH_REQUIRED: Session expired")
+            u_obj = resp.json() or {}
+            if not bool((u_obj.get("app_metadata") or {}).get("radar_admin")):
+                raise HTTPException(status_code=403, detail="该账号无管理员权限")
+            _verified_admin_tokens[tok] = now + 300.0
 
 
 class AuthLoginRequest(BaseModel):
@@ -128,8 +151,9 @@ async def supabase_login(req: AuthLoginRequest) -> Dict[str, Any]:
 
     disp_email = user_obj.get("email") or email
     disp_name = disp_email.split("@")[0] if disp_email.endswith("@viora.local.invalid") else disp_email
-    # Prime settings immediately using the freshly issued token
+    # Prime settings & verified token cache immediately using the freshly issued token
     current_user_jwt.set(data["access_token"])
+    _verified_admin_tokens[data["access_token"]] = time.time() + 300.0
     supabase_store.sync_runtime_settings(force=True)
 
     return {
@@ -208,7 +232,7 @@ async def list_items(
     )
 
 
-@router.post("/scan", dependencies=[Depends(_require_write_auth)])
+@router.post("/scan")
 async def run_scan(req: ScanRequest) -> Dict[str, Any]:
     if is_supabase_enabled():
         supabase_store.sync_runtime_settings(force=False)
@@ -298,13 +322,13 @@ async def run_scan(req: ScanRequest) -> Dict[str, Any]:
     }
 
 
-@router.post("/star", dependencies=[Depends(_require_write_auth)])
+@router.post("/star")
 async def toggle_star_item(req: StarRequest) -> Dict[str, Any]:
     new_state = radar_db.toggle_star(req.id)
     return {"ok": new_state is not None, "id": req.id, "starred": new_state}
 
 
-@router.post("/translate", dependencies=[Depends(_require_write_auth)])
+@router.post("/translate", dependencies=[Depends(_require_translate_auth)])
 async def manual_translate_items(req: TranslateRequest) -> Dict[str, Any]:
     if is_supabase_enabled():
         supabase_store.sync_runtime_settings(force=False)
