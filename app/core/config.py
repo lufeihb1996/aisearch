@@ -89,6 +89,10 @@ def get_supabase_url() -> str:
         )
         if val and str(val).strip():
             return str(val).strip().rstrip("/")
+    # Also support custom-prefixed Vercel Storage Integration env vars (e.g. STORAGE_SUPABASE_URL)
+    for env_k, env_v in os.environ.items():
+        if env_k.endswith("SUPABASE_URL") and env_v and env_v.strip():
+            return env_v.strip().rstrip("/")
     return ""
 
 
@@ -101,6 +105,10 @@ def get_supabase_server_key() -> str:
         )
         if val and str(val).strip():
             return str(val).strip()
+    # Also support custom-prefixed Vercel Storage Integration env vars
+    for env_k, env_v in os.environ.items():
+        if env_k.endswith(("SUPABASE_SECRET_KEY", "SUPABASE_SERVICE_ROLE_KEY")) and env_v and env_v.strip():
+            return env_v.strip()
     return ""
 
 

@@ -291,9 +291,19 @@ async function loadStatus() {
   try {
     const res = await fetch("/api/status");
     const d = await res.json();
+    const dbPill = document.getElementById("st-db");
     const dbLabel = document.getElementById("st-db-label");
-    if (dbLabel) {
-      dbLabel.textContent = d.storage_backend === "supabase" ? "Supabase" : "SQLite";
+    if (dbLabel && dbPill) {
+      if (d.storage_backend === "supabase") {
+        dbPill.classList.add("ok");
+        dbLabel.textContent = "Supabase";
+      } else if (d.is_vercel) {
+        dbPill.classList.remove("ok");
+        dbLabel.textContent = state.uiLang === "en" ? "Temp SQLite (Unlinked)" : "未连 Supabase";
+      } else {
+        dbPill.classList.add("ok");
+        dbLabel.textContent = "SQLite";
+      }
     }
     document.getElementById("st-jev").classList.toggle("ok", !!d.has_jev_key);
     document.getElementById("st-x").classList.toggle("ok", !!d.has_x_cookie);

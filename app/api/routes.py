@@ -96,6 +96,7 @@ async def get_status() -> Dict[str, Any]:
     data = radar_db.query_items(page=1, page_size=1)
     return {
         "ok": True,
+        "is_vercel": IS_VERCEL,
         "storage_backend": "supabase" if is_supabase_enabled() else "sqlite",
         "requires_admin_password": bool(get_admin_password()),
         "has_jev_key": bool(get_typesafe_api_key()),
