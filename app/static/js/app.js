@@ -2,10 +2,6 @@ const I18N = {
   zh: {
     brandTitle: "AI 新物种猎手雷达",
     brandSub: "5 源无词捕获 · 书签收藏比提纯 · 评论区一楼穿透 · TypeSafe Jev 终审",
-    stJev: "Jev 裁判",
-    stX: "X Cookie",
-    stZh: "DeepSeek 翻译",
-    btnSettings: "⚙️ 密钥 / Cookie 配置",
     sourcesLabel: "数据源 (勾谁看谁 & 扫谁)：",
     btnSelectAll: "全选",
     srcX: "𝕏 推荐/关注 & 热榜联动",
@@ -38,21 +34,13 @@ const I18N = {
     sortBookmarks: "排序：干货收藏比 / Star 热度",
     sortLatest: "排序：发布时间最新",
     loadingFeed: "正在连接情报库...",
-    modalTitle: "配置密钥与 X 登录 Cookie",
-    modalTip: "留空的项不会覆盖你现有的已保存配置（云端模式下自动加密存入 Supabase）。",
-    lblAdminPwd: "管理员操作口令 (对应 Vercel 环境变量 RADAR_ADMIN_PASSWORD，留空不改)",
-    lblJevKey: "官方 TypeSafe Jev API Key (console.typesafe.ai)",
-    lblXAuth: "X (Twitter) Cookie: auth_token (40位)",
-    lblXCt0: "X (Twitter) Cookie: ct0 (160位)",
-    lblOrKey: "OpenRouter API Key (默认调用 DeepSeek V4 Flash 手动翻译中文)",
-    btnSave: "保存并生效",
     btnCancel: "取消",
-    authTitle: "登录你的 Supabase 管理员账号",
-    authTip: "直接输入你在 MOSS Studio 用的账号密码（如 xr110），登录后自动读取云端已存密钥并解锁扫描/翻译权限。",
-    lblAuthUser: "用户名或邮箱",
+    authTitle: "管理员登录",
+    authTip: "登录后可执行多源扫描、中文提炼与收藏管理。",
+    lblAuthUser: "账号",
     lblAuthPass: "密码",
-    btnLogin: "登录并同步云端密钥",
-    btnSignInTop: "🔑 登录账号",
+    btnLogin: "登录",
+    btnSignInTop: "🔑 登录",
     btnSignedInFmt: (u) => `👤 ${u} (退出)`,
     noSourceEmpty: "未勾选任何数据源 — 请在上方勾选至少 1 个源头（如 📦 GitHub 暴涨新库）即可立即显示对应项目。",
     noItemsEmpty: "当前筛选下暂无条目 — 点击上方「⚡ 立即扫描已勾选源」一键抓取并由 Jev 判分入库！",
@@ -100,10 +88,6 @@ const I18N = {
   en: {
     brandTitle: "AI Tech Radar",
     brandSub: "5-Source Zero-Keyword Discovery · Bookmark Ratio Signal · 1st-Reply Link Rescue · TypeSafe Jev Judge",
-    stJev: "Jev Judge",
-    stX: "X Cookie",
-    stZh: "DeepSeek ZH",
-    btnSettings: "⚙️ Keys & Cookies",
     sourcesLabel: "Sources (Filter & Scan):",
     btnSelectAll: "Select All",
     srcX: "𝕏 For You / Following & Linked",
@@ -136,20 +120,12 @@ const I18N = {
     sortBookmarks: "Sort: Bookmark Ratio / Stars",
     sortLatest: "Sort: Latest Published",
     loadingFeed: "Connecting to intelligence database...",
-    modalTitle: "API Keys & X Session Cookies",
-    modalTip: "Empty fields keep your existing saved credentials unchanged (persisted in Supabase in cloud mode).",
-    lblAdminPwd: "Admin Password (matches RADAR_ADMIN_PASSWORD on Vercel; blank keeps current)",
-    lblJevKey: "Official TypeSafe Jev API Key (console.typesafe.ai)",
-    lblXAuth: "X (Twitter) Cookie: auth_token (40 chars)",
-    lblXCt0: "X (Twitter) Cookie: ct0 (160 chars)",
-    lblOrKey: "OpenRouter API Key (Uses DeepSeek V4 Flash for manual Chinese translation)",
-    btnSave: "Save & Apply",
     btnCancel: "Cancel",
-    authTitle: "Sign In with Your Supabase Account",
-    authTip: "Sign in with your existing Supabase username/email and password to sync cloud API keys and unlock scan/translate.",
-    lblAuthUser: "Username or Email",
+    authTitle: "Admin Sign In",
+    authTip: "Sign in as administrator to run scans, manual translations, and bookmarks.",
+    lblAuthUser: "Account",
     lblAuthPass: "Password",
-    btnLogin: "Sign In & Sync Keys",
+    btnLogin: "Sign In",
     btnSignInTop: "🔑 Sign In",
     btnSignedInFmt: (u) => `👤 ${u} (Sign Out)`,
     noSourceEmpty: "No sources selected — check at least 1 source above (e.g. 📦 GitHub Surging Repos) to display items.",
@@ -382,24 +358,7 @@ async function loadStatus() {
     const headers = await buildApiHeaders();
     const res = await fetch("/api/status", { headers });
     const d = await res.json();
-    const dbPill = document.getElementById("st-db");
-    const dbLabel = document.getElementById("st-db-label");
-    if (dbLabel && dbPill) {
-      if (d.storage_backend === "supabase") {
-        dbPill.classList.add("ok");
-        dbLabel.textContent = "Supabase";
-      } else if (d.is_vercel) {
-        dbPill.classList.remove("ok");
-        dbLabel.textContent = state.uiLang === "en" ? "Temp SQLite (Unlinked)" : "未连 Supabase";
-      } else {
-        dbPill.classList.add("ok");
-        dbLabel.textContent = "SQLite";
-      }
-    }
     renderAuthButton();
-    document.getElementById("st-jev").classList.toggle("ok", !!d.has_jev_key);
-    document.getElementById("st-x").classList.toggle("ok", !!d.has_x_cookie);
-    document.getElementById("st-zh").classList.toggle("ok", !!d.has_openrouter_key);
     updateCounts(d.source_counts);
   } catch (e) {
     console.error(e);
@@ -946,7 +905,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // Supabase Account Auth modal (same pattern as MOSS_Krea_Studio)
+  // Admin Account Auth modal
   const authModal = document.getElementById("auth-modal");
   const closeAuth = (ok = false) => {
     authModal.classList.add("hidden");
@@ -978,7 +937,7 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
     submitBtn.disabled = true;
-    msg.textContent = state.uiLang === "en" ? "Signing in..." : "正在验证账号并同步云端密钥...";
+    msg.textContent = state.uiLang === "en" ? "Signing in..." : "正在登录...";
     try {
       const res = await fetch("/api/auth/login", {
         method: "POST",
@@ -1003,35 +962,6 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("btn-submit-auth")?.addEventListener("click", submitAuth);
   document.getElementById("inp-auth-pass")?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") submitAuth();
-  });
-
-  // Settings modal
-  const modal = document.getElementById("settings-modal");
-  document.getElementById("btn-open-settings").addEventListener("click", () => modal.classList.remove("hidden"));
-  document.getElementById("btn-close-settings").addEventListener("click", () => modal.classList.add("hidden"));
-  document.getElementById("btn-cancel-settings").addEventListener("click", () => modal.classList.add("hidden"));
-
-  document.getElementById("btn-save-settings").addEventListener("click", async () => {
-    const adminVal = (document.getElementById("inp-admin-pwd")?.value || "").trim();
-    if (adminVal) {
-      localStorage.setItem("ai_radar_admin_pwd", adminVal);
-    }
-    const payload = {
-      typesafe_api_key: document.getElementById("inp-jev-key").value,
-      twitter_auth_token: document.getElementById("inp-x-auth").value,
-      twitter_ct0: document.getElementById("inp-x-ct0").value,
-      openrouter_api_key: document.getElementById("inp-or-key").value,
-    };
-    const hasServerUpdates = Object.values(payload).some((v) => v && v.trim());
-    try {
-      if (hasServerUpdates) {
-        await apiPost("/api/settings", payload);
-      }
-      modal.classList.add("hidden");
-      await loadStatus();
-    } catch (err) {
-      alert(err.message);
-    }
   });
 
   loadStatus();

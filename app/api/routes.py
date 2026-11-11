@@ -10,18 +10,14 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.core.config import (
-    ENV_FILE,
     IS_VERCEL,
     current_user_jwt,
     get_admin_password,
-    get_openrouter_api_key,
     get_supabase_publishable_key,
     get_supabase_server_key,
     get_supabase_url,
     get_system_proxy,
-    get_typesafe_api_key,
     is_supabase_enabled,
-    settings,
 )
 from app.core.database import radar_db
 from app.core.supabase_store import supabase_store
@@ -76,9 +72,9 @@ def _require_write_auth(request: Request) -> None:
         if not provided or not secrets.compare_digest(provided, expected_pwd):
             raise HTTPException(status_code=401, detail="Admin password required")
 
-    # 2. In zero-env-config Supabase publishable-key mode, writes require a signed-in Supabase admin JWT
+    # 2. Require a signed-in admin JWT when running without a server-wide secret key
     if is_supabase_enabled() and not get_supabase_server_key() and not current_user_jwt.get():
-        raise HTTPException(status_code=401, detail="AUTH_REQUIRED: Please sign in with your Supabase account")
+        raise HTTPException(status_code=401, detail="AUTH_REQUIRED: Admin sign-in required")
 
 
 class AuthLoginRequest(BaseModel):
@@ -106,19 +102,12 @@ class TranslateRequest(BaseModel):
     ids: List[str] = Field(default_factory=list)
 
 
-class SettingsPayload(BaseModel):
-    typesafe_api_key: Optional[str] = None
-    openrouter_api_key: Optional[str] = None
-    twitter_auth_token: Optional[str] = None
-    twitter_ct0: Optional[str] = None
-
-
 @router.post("/auth/login")
 async def supabase_login(req: AuthLoginRequest) -> Dict[str, Any]:
     sb_url = get_supabase_url()
     pub_key = get_supabase_publishable_key() or get_supabase_server_key()
     if not sb_url or not pub_key:
-        raise HTTPException(status_code=503, detail="Supabase is not configured")
+        raise HTTPException(status_code=503, detail="Auth service unavailable")
 
     raw_user = (req.username or "").strip().lower()
     email = raw_user if "@" in raw_user else f"{raw_user}@viora.local.invalid"
@@ -184,18 +173,8 @@ async def supabase_refresh(req: AuthRefreshRequest) -> Dict[str, Any]:
 async def get_status() -> Dict[str, Any]:
     radar_db.ensure_init()
     data = radar_db.query_items(page=1, page_size=1)
-    needs_cloud_login = bool(is_supabase_enabled() and not get_supabase_server_key())
     return {
         "ok": True,
-        "is_vercel": IS_VERCEL,
-        "storage_backend": "supabase" if is_supabase_enabled() else "sqlite",
-        "needs_cloud_login": needs_cloud_login,
-        "is_authenticated": bool(current_user_jwt.get() or get_supabase_server_key()),
-        "requires_admin_password": bool(get_admin_password()),
-        "has_jev_key": bool(get_typesafe_api_key()),
-        "has_openrouter_key": bool(get_openrouter_api_key()),
-        "has_x_cookie": x_ingestor.is_configured(),
-        "openrouter_model": settings.OPENROUTER_MODEL,
         "source_counts": data["source_counts"],
     }
 
@@ -349,49 +328,6 @@ async def manual_translate_items(req: TranslateRequest) -> Dict[str, Any]:
         "translated": len(results),
         "results": results,
     }
-
-
-@router.post("/settings", dependencies=[Depends(_require_write_auth)])
-async def save_settings(payload: SettingsPayload) -> Dict[str, Any]:
-    updates: Dict[str, str] = {}
-
-    if payload.typesafe_api_key is not None and payload.typesafe_api_key.strip():
-        val = payload.typesafe_api_key.strip()
-        settings.TYPESAFE_API_KEY = val
-        updates["TYPESAFE_API_KEY"] = val
-
-    if payload.openrouter_api_key is not None and payload.openrouter_api_key.strip():
-        val = payload.openrouter_api_key.strip()
-        settings.OPENROUTER_API_KEY = val
-        updates["OPENROUTER_API_KEY"] = val
-
-    if payload.twitter_auth_token is not None and payload.twitter_auth_token.strip():
-        val = payload.twitter_auth_token.strip()
-        settings.TWITTER_AUTH_TOKEN = val
-        updates["TWITTER_AUTH_TOKEN"] = val
-
-    if payload.twitter_ct0 is not None and payload.twitter_ct0.strip():
-        val = payload.twitter_ct0.strip()
-        settings.TWITTER_CT0 = val
-        updates["TWITTER_CT0"] = val
-
-    if updates and is_supabase_enabled():
-        supabase_store.save_runtime_settings(updates)
-
-    if updates and not IS_VERCEL:
-        env_vars: Dict[str, str] = {}
-        if ENV_FILE.exists():
-            for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
-                if "=" in line and not line.strip().startswith("#"):
-                    k, v = line.split("=", 1)
-                    env_vars[k.strip()] = v.strip()
-        env_vars.update(updates)
-        ENV_FILE.write_text(
-            "\n".join(f"{k}={v}" for k, v in env_vars.items()) + "\n",
-            encoding="utf-8",
-        )
-
-    return await get_status()
 
 
 def _clamp_vercel_range(range_hdr: Optional[str], url_path: str) -> Optional[str]:

@@ -5,7 +5,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.api.routes import router as api_router
-from app.core.config import IS_VERCEL, is_supabase_enabled, settings
+from app.core.config import IS_VERCEL, settings
 from app.core.database import radar_db
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -50,6 +50,4 @@ async def health():
     return {
         "status": "ok",
         "app": settings.APP_NAME,
-        "storage": "supabase" if is_supabase_enabled() else "sqlite",
-        "vercel": IS_VERCEL,
     }
