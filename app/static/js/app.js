@@ -47,6 +47,13 @@ const I18N = {
     lblOrKey: "OpenRouter API Key (默认调用 DeepSeek V4 Flash 手动翻译中文)",
     btnSave: "保存并生效",
     btnCancel: "取消",
+    authTitle: "登录你的 Supabase 管理员账号",
+    authTip: "直接输入你在 MOSS Studio 用的账号密码（如 xr110），登录后自动读取云端已存密钥并解锁扫描/翻译权限。",
+    lblAuthUser: "用户名或邮箱",
+    lblAuthPass: "密码",
+    btnLogin: "登录并同步云端密钥",
+    btnSignInTop: "🔑 登录账号",
+    btnSignedInFmt: (u) => `👤 ${u} (退出)`,
     noSourceEmpty: "未勾选任何数据源 — 请在上方勾选至少 1 个源头（如 📦 GitHub 暴涨新库）即可立即显示对应项目。",
     noItemsEmpty: "当前筛选下暂无条目 — 点击上方「⚡ 立即扫描已勾选源」一键抓取并由 Jev 判分入库！",
     zeroItems: "0 个精选项目",
@@ -138,6 +145,13 @@ const I18N = {
     lblOrKey: "OpenRouter API Key (Uses DeepSeek V4 Flash for manual Chinese translation)",
     btnSave: "Save & Apply",
     btnCancel: "Cancel",
+    authTitle: "Sign In with Your Supabase Account",
+    authTip: "Sign in with your existing Supabase username/email and password to sync cloud API keys and unlock scan/translate.",
+    lblAuthUser: "Username or Email",
+    lblAuthPass: "Password",
+    btnLogin: "Sign In & Sync Keys",
+    btnSignInTop: "🔑 Sign In",
+    btnSignedInFmt: (u) => `👤 ${u} (Sign Out)`,
     noSourceEmpty: "No sources selected — check at least 1 source above (e.g. 📦 GitHub Surging Repos) to display items.",
     noItemsEmpty: "No items match current filters — click '⚡ Scan Selected Sources' above to fetch & score fresh projects!",
     zeroItems: "0 items",
@@ -230,6 +244,7 @@ function applyStaticI18n() {
   document.querySelectorAll("#ui-lang-switch .lang-btn").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.uiLang === state.uiLang);
   });
+  renderAuthButton();
 }
 
 function getCheckedSources() {
@@ -252,31 +267,106 @@ function updateCounts(sc) {
   }
 }
 
+function getSavedAuth() {
+  try {
+    return JSON.parse(localStorage.getItem("ai_radar_sb_auth") || "null");
+  } catch (_) {
+    return null;
+  }
+}
+
+function setSavedAuth(sessionObj) {
+  if (!sessionObj) {
+    localStorage.removeItem("ai_radar_sb_auth");
+  } else {
+    localStorage.setItem("ai_radar_sb_auth", JSON.stringify(sessionObj));
+  }
+  renderAuthButton();
+}
+
+async function getValidAccessToken() {
+  const sess = getSavedAuth();
+  if (!sess || !sess.access_token) return "";
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (sess.expires_at && sess.expires_at - nowSec < 90 && sess.refresh_token) {
+    try {
+      const r = await fetch("/api/auth/refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: sess.refresh_token }),
+      });
+      if (r.ok) {
+        const refreshed = await r.json();
+        setSavedAuth(refreshed);
+        return refreshed.access_token || "";
+      }
+      setSavedAuth(null);
+      return "";
+    } catch (_) {}
+  }
+  return sess.access_token;
+}
+
+function renderAuthButton() {
+  const btn = document.getElementById("btn-auth-account");
+  if (!btn) return;
+  const dict = t();
+  const sess = getSavedAuth();
+  if (sess && sess.username) {
+    btn.textContent = dict.btnSignedInFmt(sess.username);
+  } else {
+    btn.textContent = dict.btnSignInTop;
+  }
+}
+
+let _pendingAuthResolve = null;
+function openAuthModalForAction() {
+  const modal = document.getElementById("auth-modal");
+  const msg = document.getElementById("auth-msg");
+  if (msg) msg.textContent = "";
+  modal.classList.remove("hidden");
+  document.getElementById("inp-auth-user")?.focus();
+  return new Promise((resolve) => {
+    _pendingAuthResolve = resolve;
+  });
+}
+
+async function buildApiHeaders() {
+  const h = { "Content-Type": "application/json" };
+  const tok = await getValidAccessToken();
+  if (tok) h["Authorization"] = `Bearer ${tok}`;
+  const pwd = localStorage.getItem("ai_radar_admin_pwd") || "";
+  if (pwd) h["X-Admin-Password"] = pwd;
+  return h;
+}
+
 async function apiPost(url, bodyObj) {
-  const buildHeaders = () => {
-    const h = { "Content-Type": "application/json" };
-    const pwd = localStorage.getItem("ai_radar_admin_pwd") || "";
-    if (pwd) h["X-Admin-Password"] = pwd;
-    return h;
-  };
   let res = await fetch(url, {
     method: "POST",
-    headers: buildHeaders(),
+    headers: await buildApiHeaders(),
     body: JSON.stringify(bodyObj || {}),
   });
   if (res.status === 401) {
-    const promptMsg =
-      state.uiLang === "en"
-        ? "This server is protected by RADAR_ADMIN_PASSWORD. Enter your admin password once:"
-        : "已开启公网防刷保护，请输入你在 Vercel 设置的管理员口令 (RADAR_ADMIN_PASSWORD)：";
-    const entered = window.prompt(promptMsg, "");
-    if (!entered || !entered.trim()) {
-      throw new Error(state.uiLang === "en" ? "Admin password required (401)" : "未输入管理员口令，操作已取消");
+    const errBody = await res.text();
+    if (errBody.includes("AUTH_REQUIRED")) {
+      const loggedIn = await openAuthModalForAction();
+      if (!loggedIn) {
+        throw new Error(state.uiLang === "en" ? "Sign-in cancelled" : "未登录管理员账号，操作已取消");
+      }
+    } else {
+      const promptMsg =
+        state.uiLang === "en"
+          ? "Enter your RADAR_ADMIN_PASSWORD:"
+          : "请输入管理员口令 (RADAR_ADMIN_PASSWORD)：";
+      const entered = window.prompt(promptMsg, "");
+      if (!entered || !entered.trim()) {
+        throw new Error(state.uiLang === "en" ? "Password required (401)" : "未输入口令，操作已取消");
+      }
+      localStorage.setItem("ai_radar_admin_pwd", entered.trim());
     }
-    localStorage.setItem("ai_radar_admin_pwd", entered.trim());
     res = await fetch(url, {
       method: "POST",
-      headers: buildHeaders(),
+      headers: await buildApiHeaders(),
       body: JSON.stringify(bodyObj || {}),
     });
   }
@@ -289,7 +379,8 @@ async function apiPost(url, bodyObj) {
 
 async function loadStatus() {
   try {
-    const res = await fetch("/api/status");
+    const headers = await buildApiHeaders();
+    const res = await fetch("/api/status", { headers });
     const d = await res.json();
     const dbPill = document.getElementById("st-db");
     const dbLabel = document.getElementById("st-db-label");
@@ -305,6 +396,7 @@ async function loadStatus() {
         dbLabel.textContent = "SQLite";
       }
     }
+    renderAuthButton();
     document.getElementById("st-jev").classList.toggle("ok", !!d.has_jev_key);
     document.getElementById("st-x").classList.toggle("ok", !!d.has_x_cookie);
     document.getElementById("st-zh").classList.toggle("ok", !!d.has_openrouter_key);
@@ -852,6 +944,65 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (err) {
       console.error(err);
     }
+  });
+
+  // Supabase Account Auth modal (same pattern as MOSS_Krea_Studio)
+  const authModal = document.getElementById("auth-modal");
+  const closeAuth = (ok = false) => {
+    authModal.classList.add("hidden");
+    if (_pendingAuthResolve) {
+      const r = _pendingAuthResolve;
+      _pendingAuthResolve = null;
+      r(ok);
+    }
+  };
+  document.getElementById("btn-auth-account")?.addEventListener("click", async () => {
+    const sess = getSavedAuth();
+    if (sess && sess.username) {
+      setSavedAuth(null);
+      await loadStatus();
+      return;
+    }
+    openAuthModalForAction();
+  });
+  document.getElementById("btn-close-auth")?.addEventListener("click", () => closeAuth(false));
+  document.getElementById("btn-cancel-auth")?.addEventListener("click", () => closeAuth(false));
+
+  const submitAuth = async () => {
+    const u = (document.getElementById("inp-auth-user")?.value || "").trim();
+    const p = document.getElementById("inp-auth-pass")?.value || "";
+    const msg = document.getElementById("auth-msg");
+    const submitBtn = document.getElementById("btn-submit-auth");
+    if (!u || !p) {
+      msg.textContent = state.uiLang === "en" ? "Please enter username and password." : "请输入账号和密码";
+      return;
+    }
+    submitBtn.disabled = true;
+    msg.textContent = state.uiLang === "en" ? "Signing in..." : "正在验证账号并同步云端密钥...";
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: u, password: p }),
+      });
+      const d = await res.json();
+      if (!res.ok || !d.ok) {
+        msg.textContent = d.detail || (state.uiLang === "en" ? "Sign-in failed" : "账号或密码不正确");
+        return;
+      }
+      document.getElementById("inp-auth-pass").value = "";
+      setSavedAuth(d);
+      closeAuth(true);
+      await loadStatus();
+    } catch (err) {
+      msg.textContent = err.message;
+    } finally {
+      submitBtn.disabled = false;
+    }
+  };
+  document.getElementById("btn-submit-auth")?.addEventListener("click", submitAuth);
+  document.getElementById("inp-auth-pass")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submitAuth();
   });
 
   // Settings modal

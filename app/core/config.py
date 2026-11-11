@@ -1,3 +1,5 @@
+import contextvars
+import json
 import os
 import sys
 import urllib.request
@@ -7,7 +9,23 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 ENV_FILE = ROOT_DIR / ".env"
+SUPABASE_CONFIG_FILE = ROOT_DIR / "config" / "supabase.json"
 IS_VERCEL: bool = bool(os.environ.get("VERCEL"))
+
+# Per-request Supabase Auth JWT forwarded from browser `Authorization: Bearer <token>`
+current_user_jwt: contextvars.ContextVar[str] = contextvars.ContextVar("current_user_jwt", default="")
+
+
+def _load_bundled_supabase_config() -> Dict[str, str]:
+    if SUPABASE_CONFIG_FILE.exists():
+        try:
+            return json.loads(SUPABASE_CONFIG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+_BUNDLED_SB = _load_bundled_supabase_config()
 
 
 class Settings(BaseSettings):
@@ -18,17 +36,17 @@ class Settings(BaseSettings):
     )
 
     APP_NAME: str = "AI Tech Radar"
-    APP_VERSION: str = "1.1.0"
+    APP_VERSION: str = "1.2.0"
     HOST: str = "127.0.0.1"
     PORT: int = 8096
 
-    # Supabase Cloud Database (auto-detected from Vercel Supabase Integration or manual env vars)
+    # Supabase Cloud Database (zero-config via config/supabase.json + optional server key)
     SUPABASE_URL: Optional[str] = None
     NEXT_PUBLIC_SUPABASE_URL: Optional[str] = None
+    SUPABASE_PUBLISHABLE_KEY: Optional[str] = None
     SUPABASE_SECRET_KEY: Optional[str] = None
     SUPABASE_SERVICE_ROLE_KEY: Optional[str] = None
 
-    # Optional write-protection password for public Vercel deployments
     RADAR_ADMIN_PASSWORD: Optional[str] = None
     ADMIN_PASSWORD: Optional[str] = None
 
@@ -43,7 +61,6 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# In-memory cache populated from Supabase `public.radar_settings` when running in cloud mode
 _runtime_overrides: Dict[str, str] = {}
 
 
@@ -89,11 +106,22 @@ def get_supabase_url() -> str:
         )
         if val and str(val).strip():
             return str(val).strip().rstrip("/")
-    # Also support custom-prefixed Vercel Storage Integration env vars (e.g. STORAGE_SUPABASE_URL)
     for env_k, env_v in os.environ.items():
         if env_k.endswith("SUPABASE_URL") and env_v and env_v.strip():
             return env_v.strip().rstrip("/")
+    if _BUNDLED_SB.get("url"):
+        return str(_BUNDLED_SB["url"]).strip().rstrip("/")
     return ""
+
+
+def get_supabase_publishable_key() -> str:
+    val = (
+        _read_dotenv_key("SUPABASE_PUBLISHABLE_KEY")
+        or settings.SUPABASE_PUBLISHABLE_KEY
+        or os.environ.get("SUPABASE_PUBLISHABLE_KEY", "")
+        or _BUNDLED_SB.get("publishableKey", "")
+    )
+    return str(val or "").strip()
 
 
 def get_supabase_server_key() -> str:
@@ -105,7 +133,6 @@ def get_supabase_server_key() -> str:
         )
         if val and str(val).strip():
             return str(val).strip()
-    # Also support custom-prefixed Vercel Storage Integration env vars
     for env_k, env_v in os.environ.items():
         if env_k.endswith(("SUPABASE_SECRET_KEY", "SUPABASE_SERVICE_ROLE_KEY")) and env_v and env_v.strip():
             return env_v.strip()
@@ -113,7 +140,11 @@ def get_supabase_server_key() -> str:
 
 
 def is_supabase_enabled() -> bool:
-    return bool(get_supabase_url() and get_supabase_server_key())
+    return bool(get_supabase_url() and (get_supabase_server_key() or get_supabase_publishable_key()))
+
+
+def has_write_privilege_in_context() -> bool:
+    return bool(get_supabase_server_key() or current_user_jwt.get())
 
 
 def get_admin_password() -> str:

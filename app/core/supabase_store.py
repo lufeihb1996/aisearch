@@ -6,6 +6,8 @@ import httpx
 
 from app.core.config import (
     apply_runtime_overrides,
+    current_user_jwt,
+    get_supabase_publishable_key,
     get_supabase_server_key,
     get_supabase_url,
     get_system_proxy,
@@ -16,9 +18,11 @@ logger = logging.getLogger(__name__)
 
 class SupabaseRadarStore:
     """
-    Pure-Python HTTPS PostgREST + RPC client for Supabase Postgres.
-    Requires zero C extensions (works natively on Vercel Python Serverless & local dev)
-    and supports both modern `sb_secret_...` keys and legacy `service_role` JWT keys.
+    Zero-env-config Supabase client (matching MOSS_Krea_Studio pattern):
+    - Public feed queries run directly with bundled `publishableKey` (`sb_publishable_...`).
+    - Owner actions & secret `radar_settings` sync use either the signed-in owner's Supabase Auth JWT
+      (`Authorization: Bearer <user_jwt>`) enforced by Postgres RLS (`app_metadata.radar_admin`),
+      or `SUPABASE_SECRET_KEY` / `SUPABASE_SERVICE_ROLE_KEY` if configured.
     """
 
     def __init__(self) -> None:
@@ -36,12 +40,24 @@ class SupabaseRadarStore:
 
     @staticmethod
     def _headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-        key = get_supabase_server_key()
-        hdrs = {
-            "apikey": key,
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-        }
+        srv_key = get_supabase_server_key()
+        pub_key = get_supabase_publishable_key()
+        user_jwt = (current_user_jwt.get() or "").strip()
+
+        if srv_key:
+            hdrs = {
+                "apikey": srv_key,
+                "Authorization": f"Bearer {srv_key}",
+                "Content-Type": "application/json",
+            }
+        else:
+            hdrs = {
+                "apikey": pub_key,
+                "Content-Type": "application/json",
+            }
+            if user_jwt:
+                hdrs["Authorization"] = f"Bearer {user_jwt}"
+
         if extra:
             hdrs.update(extra)
         return hdrs
@@ -70,6 +86,9 @@ class SupabaseRadarStore:
         return out
 
     def sync_runtime_settings(self, force: bool = False) -> Dict[str, str]:
+        # Only attempt reading protected `radar_settings` when authenticated as admin or using server key
+        if not get_supabase_server_key() and not current_user_jwt.get():
+            return {}
         now = time.time()
         if not force and (now - self._settings_synced_at) < 45.0:
             return {}
@@ -82,8 +101,9 @@ class SupabaseRadarStore:
             if resp.status_code == 200:
                 rows = resp.json() or []
                 kv = {r["key"]: r["value"] for r in rows if r.get("key") and r.get("value")}
-                apply_runtime_overrides(kv)
-                self._settings_synced_at = now
+                if kv:
+                    apply_runtime_overrides(kv)
+                    self._settings_synced_at = now
                 return kv
         except Exception as e:
             logger.warning(f"Supabase runtime settings sync skipped: {e}")

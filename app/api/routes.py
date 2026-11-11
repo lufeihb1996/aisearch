@@ -12,8 +12,12 @@ from pydantic import BaseModel, Field
 from app.core.config import (
     ENV_FILE,
     IS_VERCEL,
+    current_user_jwt,
     get_admin_password,
     get_openrouter_api_key,
+    get_supabase_publishable_key,
+    get_supabase_server_key,
+    get_supabase_url,
     get_system_proxy,
     get_typesafe_api_key,
     is_supabase_enabled,
@@ -25,7 +29,18 @@ from app.services.external_ingestors import UA, external_ingestors
 from app.services.jev_judge_service import jev_judge
 from app.services.x_ingestor import x_ingestor
 
-router = APIRouter(prefix="/api", tags=["Radar"])
+
+def _bind_request_jwt(request: Request) -> None:
+    auth_hdr = (request.headers.get("authorization") or "").strip()
+    if auth_hdr.lower().startswith("bearer "):
+        tok = auth_hdr[7:].strip()
+        if re.match(r"^[A-Za-z0-9._-]+$", tok):
+            current_user_jwt.set(tok)
+            return
+    current_user_jwt.set("")
+
+
+router = APIRouter(prefix="/api", tags=["Radar"], dependencies=[Depends(_bind_request_jwt)])
 
 ALLOWED_MEDIA_HOSTS = (
     "twimg.com",
@@ -37,9 +52,7 @@ ALLOWED_MEDIA_HOSTS = (
     "githubassets.com",
 )
 
-# Vercel Serverless has a 4.5MB response payload ceiling; clamp video Range chunks to 3MB
 VERCEL_VIDEO_CHUNK_BYTES = 3 * 1024 * 1024
-
 _media_client: Optional[httpx.AsyncClient] = None
 
 
@@ -55,16 +68,26 @@ def _get_media_client() -> httpx.AsyncClient:
     return _media_client
 
 
-def _require_admin_if_configured(request: Request) -> None:
-    expected = get_admin_password()
-    if not expected:
-        return
-    provided = (request.headers.get("x-admin-password") or "").strip()
-    if not provided or not secrets.compare_digest(provided, expected):
-        raise HTTPException(
-            status_code=401,
-            detail="Admin password required (set X-Admin-Password or configure in Settings modal)",
-        )
+def _require_write_auth(request: Request) -> None:
+    # 1. If optional static RADAR_ADMIN_PASSWORD is set, verify header
+    expected_pwd = get_admin_password()
+    if expected_pwd:
+        provided = (request.headers.get("x-admin-password") or "").strip()
+        if not provided or not secrets.compare_digest(provided, expected_pwd):
+            raise HTTPException(status_code=401, detail="Admin password required")
+
+    # 2. In zero-env-config Supabase publishable-key mode, writes require a signed-in Supabase admin JWT
+    if is_supabase_enabled() and not get_supabase_server_key() and not current_user_jwt.get():
+        raise HTTPException(status_code=401, detail="AUTH_REQUIRED: Please sign in with your Supabase account")
+
+
+class AuthLoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class AuthRefreshRequest(BaseModel):
+    refresh_token: str
 
 
 class ScanRequest(BaseModel):
@@ -90,14 +113,84 @@ class SettingsPayload(BaseModel):
     twitter_ct0: Optional[str] = None
 
 
+@router.post("/auth/login")
+async def supabase_login(req: AuthLoginRequest) -> Dict[str, Any]:
+    sb_url = get_supabase_url()
+    pub_key = get_supabase_publishable_key() or get_supabase_server_key()
+    if not sb_url or not pub_key:
+        raise HTTPException(status_code=503, detail="Supabase is not configured")
+
+    raw_user = (req.username or "").strip().lower()
+    email = raw_user if "@" in raw_user else f"{raw_user}@viora.local.invalid"
+    async with httpx.AsyncClient(proxy=get_system_proxy(), timeout=15.0) as client:
+        resp = await client.post(
+            f"{sb_url}/auth/v1/token?grant_type=password",
+            headers={"apikey": pub_key, "Content-Type": "application/json"},
+            json={"email": email, "password": req.password},
+        )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="账号或密码错误 (Invalid username or password)")
+
+    data = resp.json()
+    user_obj = data.get("user") or {}
+    is_admin = bool((user_obj.get("app_metadata") or {}).get("radar_admin"))
+    if not is_admin:
+        raise HTTPException(status_code=403, detail="该账号无雷达管理员权限")
+
+    disp_email = user_obj.get("email") or email
+    disp_name = disp_email.split("@")[0] if disp_email.endswith("@viora.local.invalid") else disp_email
+    # Prime settings immediately using the freshly issued token
+    current_user_jwt.set(data["access_token"])
+    supabase_store.sync_runtime_settings(force=True)
+
+    return {
+        "ok": True,
+        "access_token": data["access_token"],
+        "refresh_token": data.get("refresh_token", ""),
+        "expires_at": data.get("expires_at", 0),
+        "username": disp_name,
+    }
+
+
+@router.post("/auth/refresh")
+async def supabase_refresh(req: AuthRefreshRequest) -> Dict[str, Any]:
+    sb_url = get_supabase_url()
+    pub_key = get_supabase_publishable_key() or get_supabase_server_key()
+    if not sb_url or not pub_key or not req.refresh_token:
+        raise HTTPException(status_code=401, detail="Refresh unavailable")
+
+    async with httpx.AsyncClient(proxy=get_system_proxy(), timeout=15.0) as client:
+        resp = await client.post(
+            f"{sb_url}/auth/v1/token?grant_type=refresh_token",
+            headers={"apikey": pub_key, "Content-Type": "application/json"},
+            json={"refresh_token": req.refresh_token},
+        )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="Session expired")
+    data = resp.json()
+    user_obj = data.get("user") or {}
+    disp_email = user_obj.get("email") or ""
+    disp_name = disp_email.split("@")[0] if disp_email.endswith("@viora.local.invalid") else disp_email
+    return {
+        "ok": True,
+        "access_token": data["access_token"],
+        "refresh_token": data.get("refresh_token", ""),
+        "expires_at": data.get("expires_at", 0),
+        "username": disp_name,
+    }
+
+
 @router.get("/status")
 async def get_status() -> Dict[str, Any]:
     radar_db.ensure_init()
     data = radar_db.query_items(page=1, page_size=1)
+    needs_cloud_login = bool(is_supabase_enabled() and not get_supabase_server_key())
     return {
         "ok": True,
         "is_vercel": IS_VERCEL,
         "storage_backend": "supabase" if is_supabase_enabled() else "sqlite",
+        "needs_cloud_login": needs_cloud_login,
+        "is_authenticated": bool(current_user_jwt.get() or get_supabase_server_key()),
         "requires_admin_password": bool(get_admin_password()),
         "has_jev_key": bool(get_typesafe_api_key()),
         "has_openrouter_key": bool(get_openrouter_api_key()),
@@ -136,9 +229,10 @@ async def list_items(
     )
 
 
-@router.post("/scan", dependencies=[Depends(_require_admin_if_configured)])
+@router.post("/scan", dependencies=[Depends(_require_write_auth)])
 async def run_scan(req: ScanRequest) -> Dict[str, Any]:
-    radar_db.ensure_init()
+    if is_supabase_enabled():
+        supabase_store.sync_runtime_settings(force=False)
     t0 = time.time()
     enabled = set(req.sources or [])
     tasks: Dict[str, Any] = {}
@@ -225,15 +319,16 @@ async def run_scan(req: ScanRequest) -> Dict[str, Any]:
     }
 
 
-@router.post("/star", dependencies=[Depends(_require_admin_if_configured)])
+@router.post("/star", dependencies=[Depends(_require_write_auth)])
 async def toggle_star_item(req: StarRequest) -> Dict[str, Any]:
     new_state = radar_db.toggle_star(req.id)
     return {"ok": new_state is not None, "id": req.id, "starred": new_state}
 
 
-@router.post("/translate", dependencies=[Depends(_require_admin_if_configured)])
+@router.post("/translate", dependencies=[Depends(_require_write_auth)])
 async def manual_translate_items(req: TranslateRequest) -> Dict[str, Any]:
-    radar_db.ensure_init()
+    if is_supabase_enabled():
+        supabase_store.sync_runtime_settings(force=False)
     clean_ids = [str(x).strip() for x in (req.ids or []) if str(x).strip()][:20]
     if not clean_ids:
         return {"ok": True, "translated": 0, "results": {}}
@@ -256,7 +351,7 @@ async def manual_translate_items(req: TranslateRequest) -> Dict[str, Any]:
     }
 
 
-@router.post("/settings", dependencies=[Depends(_require_admin_if_configured)])
+@router.post("/settings", dependencies=[Depends(_require_write_auth)])
 async def save_settings(payload: SettingsPayload) -> Dict[str, Any]:
     updates: Dict[str, str] = {}
 
@@ -280,11 +375,9 @@ async def save_settings(payload: SettingsPayload) -> Dict[str, Any]:
         settings.TWITTER_CT0 = val
         updates["TWITTER_CT0"] = val
 
-    # 1. Persist in Supabase `public.radar_settings` when cloud DB is active (works on read-only Vercel!)
     if updates and is_supabase_enabled():
         supabase_store.save_runtime_settings(updates)
 
-    # 2. Persist in local `.env` when running locally (never write `/var/task/.env` on Vercel)
     if updates and not IS_VERCEL:
         env_vars: Dict[str, str] = {}
         if ENV_FILE.exists():
@@ -321,10 +414,6 @@ def _clamp_vercel_range(range_hdr: Optional[str], url_path: str) -> Optional[str
 
 @router.get("/media")
 async def proxy_media(url: str, request: Request) -> Response:
-    """
-    Streams external X / Reddit / HF / GitHub images & MP4 videos with Range support,
-    anti-hotlink Referer headers, and 3MB chunk clamping for Vercel Serverless safety.
-    """
     parsed = urlparse((url or "").strip())
     host = (parsed.hostname or "").lower()
     if parsed.scheme not in ("http", "https") or not any(

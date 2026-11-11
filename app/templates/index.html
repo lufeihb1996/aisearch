@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AI 新物种猎手雷达 · AI Tech Radar</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=7" />
+  <link rel="stylesheet" href="/static/css/style.css?v=8" />
 </head>
 <body>
   <div class="app-shell">
@@ -26,6 +26,7 @@
           <button class="lang-btn active" data-ui-lang="zh" type="button">中文</button>
           <button class="lang-btn" data-ui-lang="en" type="button">EN</button>
         </div>
+        <button class="btn-ghost" id="btn-auth-account" type="button">🔑 登录账号</button>
         <button class="btn-ghost" id="btn-open-settings" type="button" data-i18n="btnSettings">⚙️ 密钥 / Cookie 配置</button>
       </div>
     </header>
@@ -160,6 +161,30 @@
     </div>
   </div>
 
-  <script src="/static/js/app.js?v=7"></script>
+  <!-- Supabase Account Login Modal (same account as MOSS_Krea_Studio) -->
+  <div class="modal-backdrop hidden" id="auth-modal">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3 data-i18n="authTitle">登录你的 Supabase 管理员账号</h3>
+        <button class="modal-close" id="btn-close-auth" type="button">✕</button>
+      </div>
+      <p class="modal-tip" data-i18n="authTip">直接输入你在 MOSS Studio 用的账号密码（如 xr110），登录后自动读取云端已存密钥并解锁扫描/翻译权限。</p>
+      <div class="form-field">
+        <label data-i18n="lblAuthUser">用户名或邮箱</label>
+        <input type="text" id="inp-auth-user" placeholder="如 xr110" autocomplete="username" />
+      </div>
+      <div class="form-field">
+        <label data-i18n="lblAuthPass">密码</label>
+        <input type="password" id="inp-auth-pass" placeholder="输入密码" autocomplete="current-password" />
+      </div>
+      <p class="modal-tip" id="auth-msg" style="color: #38bdf8; min-height: 18px;"></p>
+      <div class="modal-actions">
+        <button class="btn-scan" id="btn-submit-auth" type="button" data-i18n="btnLogin">登录并同步云端密钥</button>
+        <button class="btn-ghost" id="btn-cancel-auth" type="button" data-i18n="btnCancel">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/app.js?v=8"></script>
 </body>
 </html>
