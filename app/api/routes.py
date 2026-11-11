@@ -26,14 +26,17 @@ from app.services.jev_judge_service import jev_judge
 from app.services.x_ingestor import x_ingestor
 
 
-def _bind_request_jwt(request: Request) -> None:
+def _extract_bearer_token(request: Request) -> str:
     auth_hdr = (request.headers.get("authorization") or "").strip()
     if auth_hdr.lower().startswith("bearer "):
         tok = auth_hdr[7:].strip()
         if re.match(r"^[A-Za-z0-9._-]+$", tok):
-            current_user_jwt.set(tok)
-            return
-    current_user_jwt.set("")
+            return tok
+    return ""
+
+
+async def _bind_request_jwt(request: Request) -> None:
+    current_user_jwt.set(_extract_bearer_token(request))
 
 
 router = APIRouter(prefix="/api", tags=["Radar"], dependencies=[Depends(_bind_request_jwt)])
@@ -76,9 +79,10 @@ async def _require_translate_auth(request: Request) -> None:
 
     # On Vercel (even when SUPABASE_SECRET_KEY is injected), strictly verify signed-in admin JWT for translation
     if IS_VERCEL or (is_supabase_enabled() and not get_supabase_server_key()):
-        tok = (current_user_jwt.get() or "").strip()
+        tok = _extract_bearer_token(request) or (current_user_jwt.get() or "").strip()
         if not tok:
             raise HTTPException(status_code=401, detail="AUTH_REQUIRED: Admin sign-in required")
+        current_user_jwt.set(tok)
 
         now = time.time()
         if _verified_admin_tokens.get(tok, 0.0) <= now:
@@ -95,7 +99,8 @@ async def _require_translate_auth(request: Request) -> None:
                 _verified_admin_tokens.pop(tok, None)
                 raise HTTPException(status_code=401, detail="AUTH_REQUIRED: Session expired")
             u_obj = resp.json() or {}
-            if not bool((u_obj.get("app_metadata") or {}).get("radar_admin")):
+            u_email = (u_obj.get("email") or "").lower()
+            if u_email != "xr110@viora.local.invalid" or not bool((u_obj.get("app_metadata") or {}).get("radar_admin")):
                 raise HTTPException(status_code=403, detail="该账号无管理员权限")
             _verified_admin_tokens[tok] = now + 300.0
 
@@ -133,7 +138,9 @@ async def supabase_login(req: AuthLoginRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=503, detail="Auth service unavailable")
 
     raw_user = (req.username or "").strip().lower()
-    email = raw_user if "@" in raw_user else f"{raw_user}@viora.local.invalid"
+    if raw_user != "xr110":
+        raise HTTPException(status_code=401, detail="账号或密码错误 (Invalid username or password)")
+    email = "xr110@viora.local.invalid"
     async with httpx.AsyncClient(proxy=get_system_proxy(), timeout=15.0) as client:
         resp = await client.post(
             f"{sb_url}/auth/v1/token?grant_type=password",
