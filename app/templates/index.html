@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI 新物种猎手雷达 · AI Tech Radar</title>
+  <link rel="stylesheet" href="/static/css/style.css?v=7" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-wrap">
+        <div class="brand-logo">R</div>
+        <div>
+          <h1 class="brand-title" data-i18n="brandTitle">AI 新物种猎手雷达</h1>
+          <p class="brand-sub" data-i18n="brandSub">5 源无词捕获 · 书签收藏比提纯 · 评论区一楼穿透 · TypeSafe Jev 终审</p>
+        </div>
+      </div>
+
+      <div class="status-group">
+        <span class="status-pill ok" id="st-db"><i class="dot"></i><b id="st-db-label">Supabase</b></span>
+        <span class="status-pill" id="st-jev"><i class="dot"></i><b data-i18n="stJev">Jev 裁判</b></span>
+        <span class="status-pill" id="st-x"><i class="dot"></i><b data-i18n="stX">X Cookie</b></span>
+        <span class="status-pill" id="st-zh"><i class="dot"></i><b data-i18n="stZh">DeepSeek 翻译</b></span>
+        <div class="lang-switch" id="ui-lang-switch" title="切换项目界面语言 / Switch UI Language">
+          <button class="lang-btn active" data-ui-lang="zh" type="button">中文</button>
+          <button class="lang-btn" data-ui-lang="en" type="button">EN</button>
+        </div>
+        <button class="btn-ghost" id="btn-open-settings" type="button" data-i18n="btnSettings">⚙️ 密钥 / Cookie 配置</button>
+      </div>
+    </header>
+
+    <!-- 5 Data Sources Control Panel -->
+    <section class="scanner-panel">
+      <div class="sources-row">
+        <span class="row-label" data-i18n="sourcesLabel">数据源 (勾谁看谁 & 扫谁)：</span>
+        <button class="btn-ghost" id="btn-select-all-sources" type="button" data-i18n="btnSelectAll">全选</button>
+        <label class="source-toggle checked">
+          <input type="checkbox" value="x" checked />
+          <span data-i18n="srcX">𝕏 推荐/关注 & 热榜联动</span>
+          <em id="cnt-x">0</em>
+        </label>
+        <label class="source-toggle checked">
+          <input type="checkbox" value="huggingface" checked />
+          <span data-i18n="srcHf">🤗 HuggingFace 飙升榜</span>
+          <em id="cnt-huggingface">0</em>
+        </label>
+        <label class="source-toggle checked">
+          <input type="checkbox" value="github" checked />
+          <span data-i18n="srcGh">📦 GitHub 暴涨新库</span>
+          <em id="cnt-github">0</em>
+        </label>
+        <label class="source-toggle checked">
+          <input type="checkbox" value="reddit" checked />
+          <span data-i18n="srcRd">👽 Reddit 实测热帖</span>
+          <em id="cnt-reddit">0</em>
+        </label>
+        <label class="source-toggle checked">
+          <input type="checkbox" value="hackernews" checked />
+          <span data-i18n="srcHn">🟧 HN 极客手搓</span>
+          <em id="cnt-hackernews">0</em>
+        </label>
+        <button class="tab" id="btn-starred-toggle" type="button">
+          <span data-i18n="btnStarred">⭐ 收藏夹</span> (<span id="cnt-starred">0</span>)
+        </button>
+      </div>
+
+      <div class="scan-action-row">
+        <div class="scan-controls">
+          <select id="max-judge-select">
+            <option value="18" data-i18n="optJudge18">Jev 精判 Top 18 条</option>
+            <option value="26" selected data-i18n="optJudge26">Jev 精判 Top 26 条</option>
+            <option value="40" data-i18n="optJudge40">Jev 精判 Top 40 条</option>
+          </select>
+          <button class="btn-scan" id="btn-scan" type="button" data-i18n="btnScan">⚡ 立即扫描已勾选源</button>
+          <button class="btn-translate-page" id="btn-translate-page" type="button">🌐 翻译本页未翻项</button>
+        </div>
+        <div class="scan-log" id="scan-log" data-i18n="scanHint">勾选上方数据源实时过滤列表；扫描仅抓新帖与 Jev 打分，中文翻译按需手动点击触发</div>
+      </div>
+    </section>
+
+    <!-- Filter & Search Bar -->
+    <section class="filter-panel">
+      <div class="category-chips" id="category-chips">
+        <button class="chip active" data-cat="all" type="button" data-i18n="catAll">全部赛道</button>
+        <button class="chip" data-cat="IMAGE_VIDEO_AUDIO" type="button" data-i18n="catMedia">🎬 视频·生图·语音·3D</button>
+        <button class="chip" data-cat="MODEL_WEIGHTS" type="button" data-i18n="catModel">🧠 开源模型 & 权重</button>
+        <button class="chip" data-cat="LOCAL_HACK" type="button" data-i18n="catLocal">⚡ 低显存部署 / 白嫖算力</button>
+        <button class="chip" data-cat="WILD_PROJECT" type="button" data-i18n="catWild">🛠️ AI 实战野生项目</button>
+        <button class="chip" data-cat="AGENT_TOOL" type="button" data-i18n="catAgent">🤖 Agent / 自动化工具</button>
+      </div>
+
+      <div class="sub-filters">
+        <input type="search" id="search-input" data-i18n-placeholder="searchPlaceholder" placeholder="搜项目名、模型、ComfyUI、GGUF、TTS、Agent..." />
+        <label class="mini-check">
+          <input type="checkbox" id="chk-ready-only" />
+          <span data-i18n="chkReady">🟢 只看立即可玩/已开源</span>
+        </label>
+        <label class="mini-check">
+          <input type="checkbox" id="chk-video-only" />
+          <span data-i18n="chkVideo">🎬 只看带演示视频</span>
+        </label>
+        <select id="time-select">
+          <option value="24" data-i18n="time24h">时间：24小时内</option>
+          <option value="72" selected data-i18n="time3d">时间：近 3 天</option>
+          <option value="168" data-i18n="time7d">时间：近 7 天</option>
+          <option value="0" data-i18n="timeAll">时间：全部历史</option>
+        </select>
+        <select id="sort-select">
+          <option value="score" selected data-i18n="sortScore">排序：Jev 分数 (高 → 低)</option>
+          <option value="combo" data-i18n="sortCombo">排序：综合爆款度 (Jev + 多源热度)</option>
+          <option value="bookmarks" data-i18n="sortBookmarks">排序：干货收藏比 / Star 热度</option>
+          <option value="latest" data-i18n="sortLatest">排序：发布时间最新</option>
+        </select>
+        <span class="result-counter" id="result-counter">0 个项目</span>
+      </div>
+    </section>
+
+    <!-- Cards Feed -->
+    <main class="cards-grid" id="cards-grid">
+      <div class="empty-state" data-i18n="loadingFeed">正在读取本地情报库...</div>
+    </main>
+
+    <!-- Pagination -->
+    <nav class="pagination-bar hidden" id="pagination-bar" aria-label="Pagination"></nav>
+  </div>
+
+  <!-- Settings Modal -->
+  <div class="modal-backdrop hidden" id="settings-modal">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3 data-i18n="modalTitle">配置密钥与 X 登录 Cookie</h3>
+        <button class="modal-close" id="btn-close-settings" type="button">✕</button>
+      </div>
+      <p class="modal-tip" data-i18n="modalTip">留空的项不会覆盖你现有的已保存配置。</p>
+      <div class="form-field">
+        <label data-i18n="lblAdminPwd">管理员操作口令 (对应 Vercel 环境变量 RADAR_ADMIN_PASSWORD，留空不改)</label>
+        <input type="password" id="inp-admin-pwd" placeholder="仅保存在当前浏览器本地，防止陌生人盗刷额度" />
+      </div>
+      <div class="form-field">
+        <label data-i18n="lblJevKey">官方 TypeSafe Jev API Key (console.typesafe.ai)</label>
+        <input type="password" id="inp-jev-key" placeholder="apikey_..." />
+      </div>
+      <div class="form-field">
+        <label data-i18n="lblXAuth">X (Twitter) Cookie: auth_token (40 chars)</label>
+        <input type="password" id="inp-x-auth" placeholder="x.com F12 -> Cookies -> auth_token" />
+      </div>
+      <div class="form-field">
+        <label data-i18n="lblXCt0">X (Twitter) Cookie: ct0 (160 chars)</label>
+        <input type="password" id="inp-x-ct0" placeholder="x.com F12 -> Cookies -> ct0" />
+      </div>
+      <div class="form-field">
+        <label data-i18n="lblOrKey">OpenRouter API Key (默认调用 DeepSeek V4 Flash 手动翻译中文)</label>
+        <input type="password" id="inp-or-key" placeholder="sk-or-..." />
+      </div>
+      <div class="modal-actions">
+        <button class="btn-scan" id="btn-save-settings" type="button" data-i18n="btnSave">保存并生效</button>
+        <button class="btn-ghost" id="btn-cancel-settings" type="button" data-i18n="btnCancel">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/app.js?v=7"></script>
+</body>
+</html>

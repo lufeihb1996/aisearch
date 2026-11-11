@@ -1,0 +1,30 @@
+# Secrets & Local Environment (NEVER COMMIT)
+.env
+.env.*
+!.env.example
+
+# Local SQLite Intelligence Database (contains personal timeline cache)
+app/data/*.db
+app/data/*.db-journal
+app/data/*.db-wal
+app/data/*.db-shm
+*.sqlite
+*.sqlite3
+
+# Python Virtual Environments & Bytecode
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Logs & OS/IDE Artifacts
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

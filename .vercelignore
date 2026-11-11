@@ -1,0 +1,15 @@
+.venv
+venv
+env
+__pycache__
+*.pyc
+.env
+.env.*
+!.env.example
+app/data/*.db
+app/data/*.db-*
+*.sqlite
+*.sqlite3
+.git
+start-ai-radar.bat
+start-ai-radar.sh
