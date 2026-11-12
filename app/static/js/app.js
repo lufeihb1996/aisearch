@@ -633,6 +633,7 @@ function renderCard(it) {
           controls
           preload="metadata"
           playsinline
+          webkit-playsinline
           poster="${esc(proxiedImg)}"
           src="${esc(proxiedVid)}"
           onplay="const p=this.parentElement.querySelector('.video-pill');if(p)p.style.display='none';"
@@ -851,6 +852,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!btn) return;
     document.querySelectorAll("#category-chips .chip").forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
+    btn.scrollIntoView?.({ behavior: "smooth", inline: "center", block: "nearest" });
     state.category = btn.dataset.cat;
     state.page = 1;
     loadItems();
@@ -881,13 +883,23 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   let searchTimer = null;
-  document.getElementById("search-input").addEventListener("input", (e) => {
+  const searchInp = document.getElementById("search-input");
+  searchInp.addEventListener("input", (e) => {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => {
       state.q = e.target.value.trim();
       state.page = 1;
       loadItems();
     }, 240);
+  });
+  searchInp.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      clearTimeout(searchTimer);
+      state.q = e.target.value.trim();
+      state.page = 1;
+      loadItems();
+      e.target.blur();
+    }
   });
 
   // Pagination click delegation
@@ -956,6 +968,9 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   document.getElementById("btn-close-auth")?.addEventListener("click", () => closeAuth(false));
   document.getElementById("btn-cancel-auth")?.addEventListener("click", () => closeAuth(false));
+  authModal?.addEventListener("click", (e) => {
+    if (e.target === authModal) closeAuth(false);
+  });
 
   const submitAuth = async () => {
     const u = (document.getElementById("inp-auth-user")?.value || "").trim();
@@ -990,6 +1005,12 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   };
   document.getElementById("btn-submit-auth")?.addEventListener("click", submitAuth);
+  document.getElementById("inp-auth-user")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      document.getElementById("inp-auth-pass")?.focus();
+    }
+  });
   document.getElementById("inp-auth-pass")?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") submitAuth();
   });
