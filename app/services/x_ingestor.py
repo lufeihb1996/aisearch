@@ -287,6 +287,15 @@ class XIngestor:
         views_str = (raw_res.get("views", {}) or {}).get("count")
         views = int(views_str) if views_str and str(views_str).isdigit() else 0
 
+        if quoted and quoted.get("legacy"):
+            q_leg = quoted["legacy"]
+            q_views_str = (quoted.get("views", {}) or {}).get("count")
+            q_views = int(q_views_str) if q_views_str and str(q_views_str).isdigit() else 0
+            views = max(views, q_views)
+            likes = max(likes, int(q_leg.get("favorite_count", 0) or 0))
+            bookmarks = max(bookmarks, int(q_leg.get("bookmark_count", 0) or 0))
+            retweets = max(retweets, int(q_leg.get("retweet_count", 0) or 0))
+
         first_line = clean_text.split("\n")[0].strip()[:110]
         item: Dict[str, Any] = {
             "id": f"x:{tid}",
