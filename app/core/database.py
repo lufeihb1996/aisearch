@@ -354,6 +354,36 @@ class RadarDatabase:
         finally:
             conn.close()
 
+    def bulk_update_jev_evaluations(
+        self, judged_map: Dict[str, Tuple[str, str, float, float]]
+    ) -> None:
+        if not judged_map:
+            return
+        if self._use_cloud():
+            supabase_store.bulk_update_jev_evaluations(judged_map)
+            return
+        self.ensure_init()
+        conn = self._connect()
+        try:
+            with conn:
+                conn.executemany(
+                    """
+                    UPDATE items
+                    SET jev_category = ?,
+                        jev_playability = ?,
+                        jev_score = ?,
+                        jev_hype_prob = ?,
+                        jev_evaluated = 1
+                    WHERE id = ?
+                    """,
+                    [
+                        (cat, play, round(float(jscore), 1), round(float(hype), 1), item_id)
+                        for item_id, (cat, play, jscore, hype) in judged_map.items()
+                    ],
+                )
+        finally:
+            conn.close()
+
     def update_jev_evaluation(
         self,
         item_id: str,

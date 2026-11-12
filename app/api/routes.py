@@ -257,15 +257,27 @@ async def run_scan(req: ScanRequest) -> Dict[str, Any]:
     if "hackernews" in enabled:
         tasks["hackernews"] = asyncio.create_task(external_ingestors.fetch_hackernews_show_hn(limit=18))
     if "x" in enabled and x_ingestor.is_configured():
-        tasks["x_home"] = asyncio.create_task(x_ingestor.fetch_personal_feeds(pages_for_you=3, pages_following=2))
+        tasks["x_home"] = asyncio.create_task(x_ingestor.fetch_personal_feeds(pages_for_you=2, pages_following=2))
+        tasks["x_open"] = asyncio.create_task(x_ingestor.fetch_open_launches())
+        tasks["_known_x"] = asyncio.create_task(asyncio.to_thread(radar_db.get_known_ids, "x:", 5000))
 
     fetched_by_source: Dict[str, int] = {}
     all_raw: List[Dict[str, Any]] = []
     hot_terms_for_x: List[str] = []
+    known_x: set = set()
+    x_open_raw: List[Dict[str, Any]] = []
 
     if tasks:
         done_values = await asyncio.gather(*tasks.values(), return_exceptions=True)
         for name, res in zip(tasks.keys(), done_values):
+            if name == "_known_x":
+                if isinstance(res, set):
+                    known_x = res
+                continue
+            if name == "x_open":
+                if isinstance(res, list):
+                    x_open_raw = res
+                continue
             if isinstance(res, list):
                 fetched_by_source[name] = len(res)
                 all_raw.extend(res)
@@ -277,10 +289,10 @@ async def run_scan(req: ScanRequest) -> Dict[str, Any]:
             else:
                 fetched_by_source[name] = 0
 
-    known_x = radar_db.get_known_ids(prefix="x:", limit=5000) if "x" in enabled else set()
-
     if "x" in enabled and x_ingestor.is_configured():
-        x_extra = await x_ingestor.fetch_broad_launches_and_reverse_terms(hot_terms_for_x, known_x)
+        x_rev = await x_ingestor.fetch_reverse_hot_terms(hot_terms_for_x, known_x)
+        x_merged = {it["id"]: it for it in [*x_open_raw, *x_rev] if it["id"] not in known_x}
+        x_extra = list(x_merged.values())
         fetched_by_source["x_search"] = len(x_extra)
         all_raw.extend(x_extra)
 
@@ -288,7 +300,7 @@ async def run_scan(req: ScanRequest) -> Dict[str, Any]:
     rescued_links_count = 0
     if "x" in enabled and x_ingestor.is_configured():
         fresh_x_raw = [c for c in all_raw if c["id"] not in known_x]
-        rescued_map = await x_ingestor.rescue_author_reply_links(fresh_x_raw[:25], max_checks=6)
+        rescued_map = await x_ingestor.rescue_author_reply_links(fresh_x_raw[:20], max_checks=5)
         for it in all_raw:
             if it["id"] in rescued_map:
                 it["project_links"] = (it.get("project_links") or []) + rescued_map[it["id"]]
@@ -305,10 +317,11 @@ async def run_scan(req: ScanRequest) -> Dict[str, Any]:
         priority_ids=new_ids,
     )
     judged_map = await jev_judge.evaluate_batch(to_judge)
+    radar_db.bulk_update_jev_evaluations(judged_map)
+
     noise_filtered = 0
     new_judged_count = 0
-    for item_id, (cat, play, jscore, hype) in judged_map.items():
-        radar_db.update_jev_evaluation(item_id, cat, play, jscore, hype)
+    for item_id, (cat, _play, _jscore, hype) in judged_map.items():
         if item_id in new_id_set:
             new_judged_count += 1
         if cat == "NOISE" or hype >= 75.0:

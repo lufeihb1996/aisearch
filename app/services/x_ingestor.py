@@ -340,23 +340,18 @@ class XIngestor:
                         parsed_items.append(item)
         return parsed_items, next_cursor
 
-    async def fetch_personal_feeds(self, pages_for_you: int = 3, pages_following: int = 2) -> List[Dict[str, Any]]:
+    async def fetch_personal_feeds(self, pages_for_you: int = 2, pages_following: int = 2) -> List[Dict[str, Any]]:
         if not self.is_configured():
             return []
         proxy = get_system_proxy()
         collected: Dict[str, Dict[str, Any]] = {}
-        async with httpx.AsyncClient(proxy=proxy, follow_redirects=True, timeout=22.0) as client:
-            await self._ensure_graphql_ops(client)
-
-            for op_name, pages, badge in [
-                ("HomeTimeline", pages_for_you, "X 为你推荐"),
-                ("HomeLatestTimeline", pages_following, "X 正在关注"),
-            ]:
+        async with httpx.AsyncClient(proxy=proxy, follow_redirects=True, timeout=9.5) as client:
+            async def _fetch_feed(op_name: str, pages: int, badge: str) -> None:
                 qid, feats = self._get_op(op_name)
                 cursor: Optional[str] = None
                 for _ in range(pages):
                     variables: Dict[str, Any] = {
-                        "count": 35,
+                        "count": 40,
                         "includePromotedContent": False,
                         "latestControlAvailable": True,
                         "requestContext": "launch",
@@ -370,6 +365,15 @@ class XIngestor:
                             cookies=self._cookies(),
                             headers=self._api_headers(),
                         )
+                        if resp.status_code in (400, 404):
+                            await self._ensure_graphql_ops(client)
+                            qid, feats = self._get_op(op_name)
+                            resp = await client.post(
+                                f"https://x.com/i/api/graphql/{qid}/{op_name}",
+                                json={"variables": variables, "features": feats, "queryId": qid},
+                                cookies=self._cookies(),
+                                headers=self._api_headers(),
+                            )
                         if resp.status_code != 200:
                             logger.warning(f"{op_name} HTTP {resp.status_code}")
                             break
@@ -382,7 +386,6 @@ class XIngestor:
                         )
                         batch, cursor = self._extract_entries_from_instructions(instructions, "x_home", badge)
                         for b in batch:
-                            # Keep low-noise high-signal posts from timeline
                             m = b["metrics"]
                             if m["likes"] >= 8 or m["bookmarks"] >= 3 or b["project_links"] or b["video_url"]:
                                 collected[b["id"]] = b
@@ -392,42 +395,23 @@ class XIngestor:
                         logger.warning(f"Error fetching {op_name}: {e}")
                         break
 
-        return list(collected.values())
-
-    async def fetch_broad_launches_and_reverse_terms(
-        self, hot_terms: List[str], known_x_ids: Set[str]
-    ) -> List[Dict[str, Any]]:
-        """
-        Zero-guess broad X launch catchers + reverse lookup for today's hot HF/GitHub project names.
-        """
-        if not self.is_configured():
-            return []
-        proxy = get_system_proxy()
-        queries: List[Tuple[str, str]] = [
-            (
-                '("github.com" OR "huggingface.co" OR "open weights" OR comfyui OR gguf) min_faves:80 within_time:48h -is:retweet -filter:replies -"bookmark this" -"10 repos"',
-                "X 开源高热",
-            ),
-        ]
-        # Take top 3 clean distinctive project names from today's HF/GitHub trending for X video/demo cross-match
-        clean_terms: List[str] = []
-        for t in hot_terms:
-            slug = t.split("/")[-1].strip()
-            if 4 <= len(slug) <= 28 and re.match(r"^[A-Za-z0-9._-]+$", slug):
-                clean_terms.append(f'"{slug}"')
-            if len(clean_terms) >= 4:
-                break
-        if clean_terms:
-            queries.append(
-                (f"({' OR '.join(clean_terms)}) min_faves:15 -is:retweet -filter:replies", "X 热榜联动")
+            await asyncio.gather(
+                _fetch_feed("HomeTimeline", pages_for_you, "X 为你推荐"),
+                _fetch_feed("HomeLatestTimeline", pages_following, "X 正在关注"),
             )
 
-        collected: Dict[str, Dict[str, Any]] = {}
-        async with httpx.AsyncClient(proxy=proxy, follow_redirects=True, timeout=20.0) as client:
-            await self._ensure_graphql_ops(client)
-            qid, feats = self._get_op("SearchTimeline")
+        return list(collected.values())
 
-            for raw_q, badge in queries:
+    async def _run_search_queries(
+        self, queries: List[Tuple[str, str]], known_x_ids: Set[str]
+    ) -> List[Dict[str, Any]]:
+        if not self.is_configured() or not queries:
+            return []
+        proxy = get_system_proxy()
+        collected: Dict[str, Dict[str, Any]] = {}
+        async with httpx.AsyncClient(proxy=proxy, follow_redirects=True, timeout=8.5) as client:
+            async def _one_query(raw_q: str, badge: str) -> None:
+                qid, feats = self._get_op("SearchTimeline")
                 variables = {
                     "rawQuery": raw_q,
                     "count": 25,
@@ -435,13 +419,15 @@ class XIngestor:
                     "product": "Top",
                 }
                 try:
-                    resp = await client.post(
+                    resp = await client.get(
                         f"https://x.com/i/api/graphql/{qid}/SearchTimeline",
-                        json={"variables": variables, "features": feats},
+                        params={"variables": json.dumps(variables), "features": json.dumps(feats)},
                         cookies=self._cookies(),
                         headers=self._api_headers(),
                     )
-                    if resp.status_code != 200:
+                    if resp.status_code in (400, 404):
+                        await self._ensure_graphql_ops(client)
+                        qid, feats = self._get_op("SearchTimeline")
                         resp = await client.get(
                             f"https://x.com/i/api/graphql/{qid}/SearchTimeline",
                             params={"variables": json.dumps(variables), "features": json.dumps(feats)},
@@ -449,7 +435,7 @@ class XIngestor:
                             headers=self._api_headers(),
                         )
                     if resp.status_code != 200:
-                        continue
+                        return
                     instructions = (
                         resp.json()
                         .get("data", {})
@@ -465,9 +451,48 @@ class XIngestor:
                 except Exception as e:
                     logger.warning(f"X search warning ({badge}): {e}")
 
+            await asyncio.gather(*[_one_query(rq, bg) for rq, bg in queries])
         return list(collected.values())
 
-    async def rescue_author_reply_links(self, candidates: List[Dict[str, Any]], max_checks: int = 8) -> Dict[str, List[Dict[str, str]]]:
+    async def fetch_open_launches(self) -> List[Dict[str, Any]]:
+        return await self._run_search_queries(
+            [
+                (
+                    '("github.com" OR "huggingface.co" OR "open weights" OR comfyui OR gguf) min_faves:80 within_time:48h -is:retweet -filter:replies -"bookmark this" -"10 repos"',
+                    "X 开源高热",
+                )
+            ],
+            set(),
+        )
+
+    async def fetch_reverse_hot_terms(
+        self, hot_terms: List[str], known_x_ids: Set[str]
+    ) -> List[Dict[str, Any]]:
+        clean_terms: List[str] = []
+        for t in hot_terms:
+            slug = t.split("/")[-1].strip()
+            if 4 <= len(slug) <= 28 and re.match(r"^[A-Za-z0-9._-]+$", slug):
+                clean_terms.append(f'"{slug}"')
+            if len(clean_terms) >= 4:
+                break
+        if not clean_terms:
+            return []
+        return await self._run_search_queries(
+            [(f"({' OR '.join(clean_terms)}) min_faves:15 -is:retweet -filter:replies", "X 热榜联动")],
+            known_x_ids,
+        )
+
+    async def fetch_broad_launches_and_reverse_terms(
+        self, hot_terms: List[str], known_x_ids: Set[str]
+    ) -> List[Dict[str, Any]]:
+        open_res, rev_res = await asyncio.gather(
+            self.fetch_open_launches(),
+            self.fetch_reverse_hot_terms(hot_terms, known_x_ids),
+        )
+        merged = {it["id"]: it for it in [*open_res, *rev_res] if it["id"] not in known_x_ids}
+        return list(merged.values())
+
+    async def rescue_author_reply_links(self, candidates: List[Dict[str, Any]], max_checks: int = 6) -> Dict[str, List[Dict[str, str]]]:
         """
         Penetrates 'Links in first comment 👇' on X:
         Fetches TweetDetail for top candidates missing direct links and extracts URLs posted by the author in replies!
@@ -483,9 +508,8 @@ class XIngestor:
 
         proxy = get_system_proxy()
         rescued: Dict[str, List[Dict[str, str]]] = {}
-        sem = asyncio.Semaphore(4)
-        async with httpx.AsyncClient(proxy=proxy, follow_redirects=True, timeout=18.0) as client:
-            await self._ensure_graphql_ops(client)
+        sem = asyncio.Semaphore(6)
+        async with httpx.AsyncClient(proxy=proxy, follow_redirects=True, timeout=6.0) as client:
             qid, feats = self._get_op("TweetDetail")
 
             async def _rescue_one(item: Dict[str, Any]) -> None:

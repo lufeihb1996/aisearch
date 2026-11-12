@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import html
 import logging
@@ -25,7 +26,7 @@ class ExternalIngestors:
         proxy = get_system_proxy()
         items: List[Dict[str, Any]] = []
         try:
-            async with httpx.AsyncClient(proxy=proxy, follow_redirects=True, timeout=18.0) as client:
+            async with httpx.AsyncClient(proxy=proxy, follow_redirects=True, timeout=7.5) as client:
                 resp = await client.get(
                     f"https://huggingface.co/api/trending?limit={limit}",
                     headers={"user-agent": UA},
@@ -103,20 +104,26 @@ class ExternalIngestors:
         since_date = (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
         items: List[Dict[str, Any]] = []
         try:
-            async with httpx.AsyncClient(proxy=proxy, follow_redirects=True, timeout=18.0) as client:
+            async with httpx.AsyncClient(proxy=proxy, follow_redirects=True, timeout=7.5) as client:
                 # Two lightweight queries: general fast-rising new repos (filtered for AI/builder relevance) + explicit AI/LLM/vision new repos
                 queries = [
                     f"created:>{since_date} stars:>60",
                     f"(llm OR agent OR comfyui OR diffusion OR mcp OR tts OR voice OR 3d OR model) created:>{since_date} stars:>25",
                 ]
+                resps = await asyncio.gather(
+                    *[
+                        client.get(
+                            "https://api.github.com/search/repositories",
+                            params={"q": q, "sort": "stars", "order": "desc", "per_page": limit},
+                            headers={"user-agent": UA, "accept": "application/vnd.github+json"},
+                        )
+                        for q in queries
+                    ],
+                    return_exceptions=True,
+                )
                 seen_full: set[str] = set()
-                for q in queries:
-                    resp = await client.get(
-                        "https://api.github.com/search/repositories",
-                        params={"q": q, "sort": "stars", "order": "desc", "per_page": limit},
-                        headers={"user-agent": UA, "accept": "application/vnd.github+json"},
-                    )
-                    if resp.status_code != 200:
+                for resp in resps:
+                    if isinstance(resp, Exception) or resp.status_code != 200:
                         continue
                     for repo in resp.json().get("items", []):
                         full_name = repo.get("full_name", "")
@@ -180,7 +187,7 @@ class ExternalIngestors:
         items: List[Dict[str, Any]] = []
         url = "https://www.reddit.com/r/LocalLLaMA+StableDiffusion+comfyui/top/.rss?t=day&limit=25"
         try:
-            async with httpx.AsyncClient(proxy=proxy, follow_redirects=True, timeout=18.0) as client:
+            async with httpx.AsyncClient(proxy=proxy, follow_redirects=True, timeout=5.5) as client:
                 resp = await client.get(
                     url,
                     headers={
@@ -255,7 +262,7 @@ class ExternalIngestors:
         proxy = get_system_proxy()
         items: List[Dict[str, Any]] = []
         try:
-            async with httpx.AsyncClient(proxy=proxy, follow_redirects=True, timeout=15.0) as client:
+            async with httpx.AsyncClient(proxy=proxy, follow_redirects=True, timeout=7.0) as client:
                 resp = await client.get(
                     "https://hn.algolia.com/api/v1/search_by_date",
                     params={

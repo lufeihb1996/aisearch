@@ -220,6 +220,28 @@ class SupabaseRadarStore:
         resp.raise_for_status()
         return [self._normalize_row(r) for r in (resp.json() or [])]
 
+    def bulk_update_jev_evaluations(
+        self, judged_map: Dict[str, Tuple[str, str, float, float]]
+    ) -> None:
+        if not judged_map:
+            return
+        payload = [
+            {
+                "id": item_id,
+                "category": cat,
+                "playability": play,
+                "score": round(float(jscore), 1),
+                "hype_prob": round(float(hype), 1),
+            }
+            for item_id, (cat, play, jscore, hype) in judged_map.items()
+        ]
+        resp = self._get_client().post(
+            self._rest_url("rpc/radar_bulk_update_jev"),
+            headers=self._headers(),
+            json={"p_evals": payload},
+        )
+        resp.raise_for_status()
+
     def update_jev_evaluation(
         self,
         item_id: str,

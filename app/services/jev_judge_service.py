@@ -108,13 +108,16 @@ class JevJudgeService:
         api_key = get_typesafe_api_key()
 
         if api_key:
-            sem = asyncio.Semaphore(6)
+            sem = asyncio.Semaphore(16)
             try:
                 async with AsyncTypeSafeClient(api_key=api_key) as client:
                     async def _worker(it: Dict[str, Any]) -> None:
                         async with sem:
                             try:
-                                results[it["id"]] = await self._evaluate_single_with_official_jev(client, it)
+                                results[it["id"]] = await asyncio.wait_for(
+                                    self._evaluate_single_with_official_jev(client, it),
+                                    timeout=11.0,
+                                )
                             except Exception as e:
                                 logger.warning(f"Official Jev item eval fallback ({it['id']}): {e}")
                                 results[it["id"]] = self._fallback_heuristic_judge(it)
