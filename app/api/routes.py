@@ -23,6 +23,7 @@ from app.core.database import radar_db
 from app.core.supabase_store import supabase_store
 from app.services.external_ingestors import UA, external_ingestors
 from app.services.jev_judge_service import jev_judge
+from app.services.ranker_service import compute_signal_score, derive_canonical_key
 from app.services.x_ingestor import x_ingestor
 
 
@@ -219,7 +220,7 @@ async def list_items(
     starred: bool = False,
     include_noise: bool = False,
     q: str = "",
-    sort: str = "score",
+    sort: str = "combo",
     hours: int = 0,
     page: int = 1,
     page_size: int = 10,
@@ -291,6 +292,8 @@ async def run_scan(req: ScanRequest) -> Dict[str, Any]:
         for it in all_raw:
             if it["id"] in rescued_map:
                 it["project_links"] = (it.get("project_links") or []) + rescued_map[it["id"]]
+                it["canonical_key"] = derive_canonical_key(it["id"], it["project_links"])
+                it["signal_score"] = compute_signal_score(it)
                 rescued_links_count += len(rescued_map[it["id"]])
 
     inserted, new_ids = radar_db.upsert_raw_items(all_raw)

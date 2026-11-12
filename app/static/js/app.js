@@ -29,9 +29,10 @@ const I18N = {
     time3d: "时间：近 3 天",
     time7d: "时间：近 7 天",
     timeAll: "时间：全部历史",
-    sortScore: "排序：Jev 分数 (高 → 低)",
-    sortCombo: "排序：综合爆款度 (Jev + 多源热度)",
-    sortBookmarks: "排序：干货收藏比 / Star 热度",
+    sortCombo: "排序：综合爆款度 (Jev + 20w查看 + 开源)",
+    sortViews: "排序：🔥 查看量 (20w+ 爆款优先)",
+    sortScore: "排序：纯 Jev 技术分 (高 → 低)",
+    sortBookmarks: "排序：干货收藏密度 / Star",
     sortLatest: "排序：发布时间最新",
     loadingFeed: "正在连接情报库...",
     btnCancel: "取消",
@@ -69,6 +70,8 @@ const I18N = {
     scoreJev: (s) => `Jev ${s}分`,
     scoreSig: (s) => `初筛 ${s}分`,
     bmLabel: (cnt, ratio) => `🔖 收藏 ${cnt}${ratio ? ` (收藏率 ${ratio}%)` : ""}`,
+    viewsViralFmt: (v) => `🔥 ${v} 查看`,
+    viewsFmt: (v) => `👁 ${v} 查看`,
     dlLabel: (cnt) => `⬇ 下载 ${cnt}`,
     catLabels: {
       IMAGE_VIDEO_AUDIO: "🎬 视觉·视频·音频·3D",
@@ -115,9 +118,10 @@ const I18N = {
     time3d: "Time: Last 3 Days",
     time7d: "Time: Last 7 Days",
     timeAll: "Time: All Time",
-    sortScore: "Sort: Jev Score (High → Low)",
-    sortCombo: "Sort: Viral Combo (Jev + Multi-Source)",
-    sortBookmarks: "Sort: Bookmark Ratio / Stars",
+    sortCombo: "Sort: Viral Rank (Jev + 200k Views + Open-Source)",
+    sortViews: "Sort: 🔥 Views (200k+ Viral First)",
+    sortScore: "Sort: Pure Jev Score (High → Low)",
+    sortBookmarks: "Sort: Save Density / Stars",
     sortLatest: "Sort: Latest Published",
     loadingFeed: "Connecting to intelligence database...",
     btnCancel: "Cancel",
@@ -155,6 +159,8 @@ const I18N = {
     scoreJev: (s) => `Jev ${s}`,
     scoreSig: (s) => `Sig ${s}`,
     bmLabel: (cnt, ratio) => `🔖 ${cnt}${ratio ? ` (${ratio}% saved)` : ""}`,
+    viewsViralFmt: (v) => `🔥 ${v} views`,
+    viewsFmt: (v) => `👁 ${v} views`,
     dlLabel: (cnt) => `⬇ ${cnt}`,
     catLabels: {
       IMAGE_VIDEO_AUDIO: "🎬 Vision · Video · Audio · 3D",
@@ -191,7 +197,7 @@ const state = {
   readyOnly: false,
   videoOnly: false,
   q: "",
-  sort: "score",
+  sort: "combo",
   hours: 72,
   page: 1,
   pageSize: 10,
@@ -509,6 +515,21 @@ function formatRelativeAge(ts) {
   return `${Math.floor(diffSec / 86400)}天前`;
 }
 
+function formatViews(num) {
+  const n = Number(num || 0);
+  if (!n || n <= 0) return "";
+  if (state.uiLang === "en") {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, "")}K`;
+    return String(n);
+  }
+  if (n >= 10_000) {
+    const wan = n / 10_000;
+    return `${wan >= 100 ? Math.round(wan) : wan.toFixed(1).replace(/\.0$/, "")}万`;
+  }
+  return n.toLocaleString();
+}
+
 function renderMetrics(item) {
   const dict = t();
   const m = item.metrics || {};
@@ -519,6 +540,15 @@ function renderMetrics(item) {
   const ageStr = formatRelativeAge(item.created_at_ts);
   if (ageStr) {
     parts.push(`<span>🕒 ${esc(ageStr)}</span>`);
+  }
+  if (m.views && Number(m.views) > 0) {
+    const vNum = Number(m.views);
+    const vText = formatViews(vNum);
+    if (vNum >= 200_000) {
+      parts.push(`<span class="views-viral" title="${vNum.toLocaleString()} views">${esc(dict.viewsViralFmt(vText))}</span>`);
+    } else {
+      parts.push(`<span class="views-stat" title="${vNum.toLocaleString()} views">${esc(dict.viewsFmt(vText))}</span>`);
+    }
   }
   if (m.stars !== undefined) {
     parts.push(`<span class="bm-highlight">★ ${Number(m.stars).toLocaleString()} Stars</span>`);

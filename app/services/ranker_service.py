@@ -1,5 +1,6 @@
 import math
 import re
+import time
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -9,6 +10,8 @@ SPAM_PATTERNS = [
     r"retweet\s+and\s+comment",
     r"\bgiveaway\b",
     r"10\s+ai\s+tools\s+that\s+feel\s+illegal",
+    r"\b\d+\s+(open[\s-]?source|github)\s+(repos|repositories)\s+(that|you\s+need)",
+    r"bookmark\s+this\s+thread",
     r"点赞.{0,6}评论.{0,6}私信",
 ]
 SPAM_RE = re.compile("|".join(SPAM_PATTERNS), re.IGNORECASE)
@@ -98,78 +101,110 @@ def needs_reply_link_rescue(text: str, project_links: List[Dict[str, str]]) -> b
         return False
     lower = text.lower()
     cues = (
-        "comment", "reply", "below", "thread", "link in", "links in",
+        "comment", "reply", "below", "thread", "link in", "links in", "link below",
         "on hf", "on github", "github repo", "hf repo", "open weights",
-        "👇", "🧵", "评论", "一楼", "置顶",
+        "👇", "⬇️", "↓", "🧵", "评论", "一楼", "置顶", "リプ", "リンク",
     )
     return any(c in lower for c in cues)
 
 
 def compute_signal_score(item: Dict[str, Any]) -> float:
     """
-    Tier-1 deterministic 'Dry-Goods Score' (0 - 100):
-    Heavily rewards X bookmark-to-like ratio, small-account viral breakouts,
-    concrete deliverables (GitHub / HF Space / HuggingFace / Demo Video), and fresh velocity.
+    Tier-1 deterministic 'Viral + Dry-Goods Score' (0 - 100):
+    Combines X impressions/views (200k+ viral threshold), bookmark-to-view & bookmark-to-like
+    density (filtering celebrity/gossip fluff), concrete deliverables (GitHub / HF / Demo Video),
+    and fresh velocity.
     """
     source = item.get("source", "")
     m = item.get("metrics", {}) or {}
     links = item.get("project_links", []) or []
     has_video = bool(item.get("video_url"))
-    score = 30.0
+    score = 25.0
 
-    # Deliverable bonuses
+    # 1. Concrete deliverable bonuses (max +24)
     kinds = {lk.get("kind") for lk in links}
     if "hf_space" in kinds:
-        score += 18.0
-    elif "github" in kinds:
         score += 16.0
+    elif "github" in kinds:
+        score += 15.0
     elif "huggingface" in kinds:
         score += 15.0
     elif "website" in kinds or "platform" in kinds:
-        score += 10.0
-    elif "paper" in kinds:
         score += 8.0
+    elif "paper" in kinds:
+        score += 6.0
 
     if has_video:
-        score += 9.0
+        score += 8.0
 
     if source in ("x_home", "x_search"):
         likes = max(0, int(m.get("likes", 0) or 0))
         bookmarks = max(0, int(m.get("bookmarks", 0) or 0))
         retweets = max(0, int(m.get("retweets", 0) or 0))
+        views = max(0, int(m.get("views", 0) or 0))
         followers = max(100, int(item.get("author_followers", 1000) or 1000))
 
-        # Bookmark-to-Like ratio: dry-goods posts routinely hit 0.25 - 1.2+ bookmark/like ratio!
         if likes >= 10:
-            bm_ratio = bookmarks / max(likes, 1)
-            m["bookmark_ratio"] = round(bm_ratio * 100, 1)
-            score += min(24.0, bm_ratio * 28.0)
+            m["bookmark_ratio"] = round((bookmarks / max(likes, 1)) * 100, 1)
+        if views >= 1000:
+            m["bm_per_kviews"] = round((bookmarks / views) * 1000, 2)
 
-        # Engagement magnitude + small-creator breakout multiplier
-        eng = likes + bookmarks * 1.8 + retweets * 1.5
+        # 2. Views / Impressions viral ladder (200k+ = industry AI/Tech viral threshold, max +20)
+        if views >= 500_000:
+            views_pts = 20.0
+        elif views >= 200_000:
+            views_pts = 16.0
+        elif views >= 100_000:
+            views_pts = 12.0
+        elif views >= 50_000:
+            views_pts = 8.5
+        elif views >= 15_000:
+            views_pts = 4.5
+        elif views >= 3_000:
+            views_pts = 2.0
+        else:
+            views_pts = 0.0
+
+        # Anti-gossip damper: high impressions (>100k) with <0.5 saves per 1k views -> halve view bonus
+        if views >= 100_000 and (bookmarks / max(views, 1)) < 0.0005:
+            views_pts *= 0.45
+        score += views_pts
+
+        # 3. Bookmark density (Bookmark/View + Bookmark/Like, max +22)
+        kv_pts = min(14.0, ((bookmarks / views) * 1000) * 2.8) if views >= 1000 else 0.0
+        if likes >= 8:
+            bl_pts = min(14.0, (bookmarks / max(likes, 1)) * 20.0)
+        else:
+            bl_pts = 4.0 if bookmarks >= 3 else 0.0
+        save_pts = min(22.0, max(kv_pts, bl_pts) + 0.35 * min(kv_pts, bl_pts))
+        score += save_pts
+
+        # 4. Small-account breakout + fresh (<8h) velocity boost (max +9)
+        eng = likes + bookmarks * 2.0 + retweets * 1.5
         if eng > 0:
-            mag = min(18.0, math.log10(max(1.0, eng)) * 5.2)
-            breakout = min(10.0, (eng / math.sqrt(followers)) * 0.45)
-            score += mag + breakout
+            score += min(6.0, (eng / math.sqrt(followers)) * 0.35)
+        created_ts = int(item.get("created_at_ts") or 0)
+        if created_ts > 0 and (time.time() - created_ts) < 8 * 3600 and (bookmarks >= 4 or kinds or has_video):
+            score += 3.0
 
     elif source == "huggingface":
         likes = int(m.get("likes", 0) or 0)
         downloads = int(m.get("downloads", 0) or 0)
-        score += min(28.0, math.log10(max(1, likes + 1)) * 10.5)
+        score += min(32.0, math.log10(max(1, likes + 1)) * 11.5)
         if downloads > 1000:
-            score += min(10.0, math.log10(downloads) * 2.0)
+            score += min(11.0, math.log10(downloads) * 2.2)
 
     elif source == "github":
         stars = int(m.get("stars", 0) or 0)
-        score += min(32.0, math.log10(max(1, stars + 1)) * 9.5)
+        score += min(36.0, math.log10(max(1, stars + 1)) * 10.5)
 
     elif source == "reddit":
-        score += 16.0
+        score += 20.0
         if kinds:
             score += 8.0
 
     elif source == "hackernews":
         pts = int(m.get("points", 0) or 0)
-        score += min(28.0, math.log10(max(1, pts + 1)) * 11.0)
+        score += min(32.0, math.log10(max(1, pts + 1)) * 12.0)
 
     return round(min(99.0, max(5.0, score)), 1)

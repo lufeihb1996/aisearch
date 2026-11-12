@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AI 新物种猎手雷达 · AI Tech Radar</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=8" />
+  <link rel="stylesheet" href="/static/css/style.css?v=9" />
 </head>
 <body>
   <div class="app-shell">
@@ -103,9 +103,10 @@
           <option value="0" data-i18n="timeAll">时间：全部历史</option>
         </select>
         <select id="sort-select">
-          <option value="score" selected data-i18n="sortScore">排序：Jev 分数 (高 → 低)</option>
-          <option value="combo" data-i18n="sortCombo">排序：综合爆款度 (Jev + 多源热度)</option>
-          <option value="bookmarks" data-i18n="sortBookmarks">排序：干货收藏比 / Star 热度</option>
+          <option value="combo" selected data-i18n="sortCombo">排序：综合爆款度 (Jev + 20w查看 + 开源)</option>
+          <option value="views" data-i18n="sortViews">排序：🔥 查看量 (20w+ 爆款优先)</option>
+          <option value="score" data-i18n="sortScore">排序：纯 Jev 技术分 (高 → 低)</option>
+          <option value="bookmarks" data-i18n="sortBookmarks">排序：干货收藏密度 / Star</option>
           <option value="latest" data-i18n="sortLatest">排序：发布时间最新</option>
         </select>
         <span class="result-counter" id="result-counter">0 个项目</span>
@@ -145,6 +146,6 @@
     </div>
   </div>
 
-  <script src="/static/js/app.js?v=11"></script>
+  <script src="/static/js/app.js?v=12"></script>
 </body>
 </html>

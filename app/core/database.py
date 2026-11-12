@@ -265,9 +265,24 @@ class RadarDatabase:
 
             cur = conn.execute(
                 f"""
-                SELECT * FROM items
-                WHERE jev_evaluated = 0
-                ORDER BY {', '.join(order_clauses)}
+                WITH ranked AS (
+                    SELECT *,
+                           ((ROW_NUMBER() OVER (PARTITION BY source_badge ORDER BY signal_score DESC, created_at_ts DESC) - 1) / 5) AS ch_wave
+                    FROM items
+                    WHERE jev_evaluated = 0
+                )
+                SELECT * FROM ranked
+                ORDER BY {', '.join(order_clauses[:2])}, ch_wave ASC, signal_score DESC, created_at_ts DESC
+                LIMIT ?
+                """ if len(order_clauses) >= 4 else f"""
+                WITH ranked AS (
+                    SELECT *,
+                           ((ROW_NUMBER() OVER (PARTITION BY source_badge ORDER BY signal_score DESC, created_at_ts DESC) - 1) / 5) AS ch_wave
+                    FROM items
+                    WHERE jev_evaluated = 0
+                )
+                SELECT * FROM ranked
+                ORDER BY {order_clauses[0]}, ch_wave ASC, signal_score DESC, created_at_ts DESC
                 LIMIT ?
                 """,
                 tuple(params),
@@ -509,12 +524,23 @@ class RadarDatabase:
 
             if sort == "latest":
                 order_sql = "created_at_ts DESC, jev_score DESC, signal_score DESC"
+            elif sort == "views":
+                order_sql = "CAST(COALESCE(json_extract(metrics, '$.views'), 0) AS INTEGER) DESC, signal_score DESC, jev_score DESC"
             elif sort == "bookmarks":
                 order_sql = "signal_score DESC, jev_score DESC"
-            elif sort == "combo":
-                order_sql = "CASE WHEN jev_evaluated = 1 THEN (jev_score * 0.65 + signal_score * 0.35) ELSE signal_score * 0.75 END DESC, created_at_ts DESC"
-            else:
+            elif sort == "score":
                 order_sql = "jev_evaluated DESC, jev_score DESC, signal_score DESC, created_at_ts DESC"
+            else:
+                # Default 'combo': Jev technical score + 200k-view signal score + READY_NOW bonus - high hype penalty
+                order_sql = (
+                    "jev_evaluated DESC, "
+                    "CASE WHEN jev_evaluated = 1 THEN ("
+                    "  jev_score * 0.55 + signal_score * 0.45 "
+                    "  + (CASE WHEN jev_playability = 'READY_NOW' THEN 6.0 WHEN jev_playability = 'WAITLIST_HYPE' THEN -10.0 ELSE 0.0 END) "
+                    "  - MAX(0.0, (jev_hype_prob - 45.0) * 0.35)"
+                    ") ELSE signal_score * 0.80 END DESC, "
+                    "created_at_ts DESC"
+                )
 
             where_clause = " AND ".join(where)
             total_cnt = conn.execute(

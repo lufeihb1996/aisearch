@@ -1,3 +1,4 @@
+import asyncio
 import email.utils
 import json
 import logging
@@ -404,7 +405,7 @@ class XIngestor:
         proxy = get_system_proxy()
         queries: List[Tuple[str, str]] = [
             (
-                '(github OR huggingface OR "open weights" OR "open source") min_faves:100 -is:retweet -filter:replies',
+                '("github.com" OR "huggingface.co" OR "open weights" OR comfyui OR gguf) min_faves:80 within_time:48h -is:retweet -filter:replies -"bookmark this" -"10 repos"',
                 "X 开源高热",
             ),
         ]
@@ -482,73 +483,75 @@ class XIngestor:
 
         proxy = get_system_proxy()
         rescued: Dict[str, List[Dict[str, str]]] = {}
+        sem = asyncio.Semaphore(4)
         async with httpx.AsyncClient(proxy=proxy, follow_redirects=True, timeout=18.0) as client:
             await self._ensure_graphql_ops(client)
             qid, feats = self._get_op("TweetDetail")
 
-            for item in targets:
-                tid = item.get("tweet_id") or item["id"].removeprefix("x:")
-                author_handle = (item.get("author_handle") or "").lstrip("@").lower()
-                variables = {
-                    "focalTweetId": tid,
-                    "with_rux_injections": False,
-                    "rankingMode": "Relevance",
-                    "includePromotedContent": False,
-                    "withCommunity": True,
-                    "withQuickPromoteEligibilityTweetFields": True,
-                    "withBirdwatchNotes": True,
-                    "withVoice": True,
-                }
-                try:
-                    resp = await client.get(
-                        f"https://x.com/i/api/graphql/{qid}/TweetDetail",
-                        params={"variables": json.dumps(variables), "features": json.dumps(feats)},
-                        cookies=self._cookies(),
-                        headers=self._api_headers(),
-                    )
-                    if resp.status_code != 200:
-                        continue
-                    instructions = (
-                        resp.json()
-                        .get("data", {})
-                        .get("threaded_conversation_with_injections_v2", {})
-                        .get("instructions", [])
-                    )
-                    found_links: List[Dict[str, str]] = []
-                    seen_u: Set[str] = set()
-                    for inst in instructions:
-                        for entry in inst.get("entries") or []:
-                            # Thread conversation items live inside content.items[].item.itemContent
-                            sub_items = (entry.get("content", {}) or {}).get("items") or []
-                            for sub in sub_items:
-                                tr = (
-                                    (sub.get("item", {}) or {})
-                                    .get("itemContent", {})
-                                    .get("tweet_results", {})
-                                    .get("result", {})
-                                )
-                                if "tweet" in tr:
-                                    tr = tr["tweet"]
-                                if not tr:
-                                    continue
-                                u_res = (tr.get("core", {}) or {}).get("user_results", {}).get("result", {}) or {}
-                                r_handle = (
-                                    (u_res.get("core", {}) or {}).get("screen_name")
-                                    or (u_res.get("legacy", {}) or {}).get("screen_name")
-                                    or ""
-                                ).lower()
-                                # Prioritize author's own thread replies (or top reply if it holds GitHub/HF)
-                                lks, _, _ = self._extract_media_and_urls(tr)
-                                for lk in lks:
-                                    if r_handle == author_handle or lk.get("kind") in ("github", "huggingface", "hf_space"):
-                                        if lk["url"] not in seen_u:
-                                            seen_u.add(lk["url"])
-                                            lk["label"] = f"💬评论区抠出 · {lk['label']}"
-                                            found_links.append(lk)
-                    if found_links:
-                        rescued[item["id"]] = found_links
-                except Exception as e:
-                    logger.debug(f"TweetDetail rescue skipped for {tid}: {e}")
+            async def _rescue_one(item: Dict[str, Any]) -> None:
+                async with sem:
+                    tid = item.get("tweet_id") or item["id"].removeprefix("x:")
+                    author_handle = (item.get("author_handle") or "").lstrip("@").lower()
+                    variables = {
+                        "focalTweetId": tid,
+                        "with_rux_injections": False,
+                        "rankingMode": "Relevance",
+                        "includePromotedContent": False,
+                        "withCommunity": True,
+                        "withQuickPromoteEligibilityTweetFields": True,
+                        "withBirdwatchNotes": True,
+                        "withVoice": True,
+                    }
+                    try:
+                        resp = await client.get(
+                            f"https://x.com/i/api/graphql/{qid}/TweetDetail",
+                            params={"variables": json.dumps(variables), "features": json.dumps(feats)},
+                            cookies=self._cookies(),
+                            headers=self._api_headers(),
+                        )
+                        if resp.status_code != 200:
+                            return
+                        instructions = (
+                            resp.json()
+                            .get("data", {})
+                            .get("threaded_conversation_with_injections_v2", {})
+                            .get("instructions", [])
+                        )
+                        found_links: List[Dict[str, str]] = []
+                        seen_u: Set[str] = set()
+                        for inst in instructions:
+                            for entry in inst.get("entries") or []:
+                                sub_items = (entry.get("content", {}) or {}).get("items") or []
+                                for sub in sub_items:
+                                    tr = (
+                                        (sub.get("item", {}) or {})
+                                        .get("itemContent", {})
+                                        .get("tweet_results", {})
+                                        .get("result", {})
+                                    )
+                                    if "tweet" in tr:
+                                        tr = tr["tweet"]
+                                    if not tr:
+                                        continue
+                                    u_res = (tr.get("core", {}) or {}).get("user_results", {}).get("result", {}) or {}
+                                    r_handle = (
+                                        (u_res.get("core", {}) or {}).get("screen_name")
+                                        or (u_res.get("legacy", {}) or {}).get("screen_name")
+                                        or ""
+                                    ).lower()
+                                    lks, _, _ = self._extract_media_and_urls(tr)
+                                    for lk in lks:
+                                        if r_handle == author_handle or lk.get("kind") in ("github", "huggingface", "hf_space"):
+                                            if lk["url"] not in seen_u:
+                                                seen_u.add(lk["url"])
+                                                lk["label"] = f"💬评论区抠出 · {lk['label']}"
+                                                found_links.append(lk)
+                        if found_links:
+                            rescued[item["id"]] = found_links
+                    except Exception as e:
+                        logger.debug(f"TweetDetail rescue skipped for {tid}: {e}")
+
+            await asyncio.gather(*[_rescue_one(it) for it in targets])
 
         return rescued
 

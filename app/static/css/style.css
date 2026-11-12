@@ -592,6 +592,20 @@ input:focus {
   font-weight: 600;
 }
 
+.views-viral {
+  color: #fb923c;
+  font-weight: 700;
+  background: rgba(251, 146, 60, 0.14);
+  border: 1px solid rgba(251, 146, 60, 0.35);
+  padding: 1px 6px;
+  border-radius: 5px;
+}
+
+.views-stat {
+  color: #93c5fd;
+  font-weight: 500;
+}
+
 .links-footer {
   margin-top: auto;
   padding-top: 10px;
