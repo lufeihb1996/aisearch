@@ -15,7 +15,7 @@ const I18N = {
     optJudge40: "Jev 精判 Top 40 条",
     btnScan: "⚡ 立即扫描已勾选源",
     btnScanBusy: "⏳ 正在多源抓取 + Jev 裁判打分中...",
-    scanHint: "勾选上方数据源实时过滤列表；扫描仅抓新帖与 Jev 打分，中文翻译按需手动点击触发",
+    scanHint: "勾选上方数据源实时过滤列表；管理员登录态下扫描会自动按赛道提炼 ≥70 分中文干货（未登录仅抓取与打分）",
     catAll: "全部赛道",
     catMedia: "🎬 视频·生图·语音·3D",
     catModel: "🧠 开源模型 & 权重",
@@ -104,7 +104,7 @@ const I18N = {
     optJudge40: "Jev Judge Top 40",
     btnScan: "⚡ Scan Selected Sources",
     btnScanBusy: "⏳ Fetching Sources & Running Jev Judge...",
-    scanHint: "Check/uncheck sources above to filter live; Scan fetches & scores items, Chinese digest is triggered manually",
+    scanHint: "Check/uncheck sources above to filter live; when signed in as admin, Scan also auto-distills ≥70 Jev items into Chinese by track",
     catAll: "All Tracks",
     catMedia: "🎬 Video · Image · Audio · 3D",
     catModel: "🧠 Open Models & Weights",
@@ -762,22 +762,30 @@ async function triggerScan() {
     return;
   }
   const maxJudge = parseInt(document.getElementById("max-judge-select").value, 10) || 26;
+  const hasAdmin = !!(getSavedAuth() && getSavedAuth().access_token);
 
   btn.disabled = true;
   btn.textContent = dict.btnScanBusy;
   log.textContent =
     state.uiLang === "en"
-      ? `Fetching ${checkedSources.length} source(s), rescuing hidden links & running official TypeSafe Jev...`
-      : `正在并发拉取 ${checkedSources.length} 个源头、穿透评论区隐藏链接并调用官方 Jev 打分（不自动消耗翻译额度）...`;
+      ? hasAdmin
+        ? `Fetching ${checkedSources.length} source(s), running TypeSafe Jev & auto-distilling ≥70 items by track...`
+        : `Fetching ${checkedSources.length} source(s), rescuing hidden links & running official TypeSafe Jev...`
+      : hasAdmin
+        ? `正在并发拉取 ${checkedSources.length} 个源头、调用 Jev 打分，并按赛道差异化提炼 ≥70 分中文干货...`
+        : `正在并发拉取 ${checkedSources.length} 个源头、穿透评论区隐藏链接并调用官方 Jev 打分（未登录仅抓取不自动翻译）...`;
 
   try {
     const d = await apiPost("/api/scan", { sources: checkedSources, max_judge: maxJudge });
     const newJ = d.jev_judged_new ?? 0;
     const oldJ = d.jev_judged_backlog ?? 0;
+    const zhCnt = d.zh_distilled ?? 0;
+    const zhSuffixEn = zhCnt > 0 ? ` · ZH distilled ${zhCnt}` : "";
+    const zhSuffixZh = zhCnt > 0 ? ` · 按赛道中文提炼 ${zhCnt} 条` : "";
     log.textContent =
       state.uiLang === "en"
-        ? `✅ Scan complete (${d.elapsed_sec}s): Fetched ${d.total_fetched} · New ${d.new_inserted} · Rescued links ${d.rescued_comment_links} · Jev judged ${d.jev_judged} (${newJ} new + ${oldJ} backlog, filtered ${d.noise_filtered} noise)`
-        : `✅ 扫描完成 (${d.elapsed_sec}s)：抓回 ${d.total_fetched} 条 · 新增入库 ${d.new_inserted} 条 · 抠出隐藏链接 ${d.rescued_comment_links} 个 · Jev 精判 ${d.jev_judged} 条 (优先评新帖 ${newJ} 条 + 补评旧帖 ${oldJ} 条，剔除水贴 ${d.noise_filtered} 条)`;
+        ? `✅ Scan complete (${d.elapsed_sec}s): Fetched ${d.total_fetched} · New ${d.new_inserted} · Rescued links ${d.rescued_comment_links} · Jev judged ${d.jev_judged} (${newJ} new + ${oldJ} backlog, filtered ${d.noise_filtered} noise)${zhSuffixEn}`
+        : `✅ 扫描完成 (${d.elapsed_sec}s)：抓回 ${d.total_fetched} 条 · 新增入库 ${d.new_inserted} 条 · 抠出隐藏链接 ${d.rescued_comment_links} 个 · Jev 精判 ${d.jev_judged} 条 (优先评新帖 ${newJ} 条 + 补评旧帖 ${oldJ} 条，剔除水贴 ${d.noise_filtered} 条)${zhSuffixZh}`;
     updateCounts(d.source_counts);
     state.page = 1;
     await loadItems();

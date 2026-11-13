@@ -178,34 +178,71 @@ class SupabaseRadarStore:
         return [self._normalize_row(r) for r in (resp.json() or [])]
 
     def get_untranslated_approved(
-        self, limit: int = 24, preferred_sources: Optional[List[str]] = None
+        self,
+        limit: int = 16,
+        preferred_sources: Optional[List[str]] = None,
+        min_jev_score: float = 70.0,
+        priority_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
-        params: Dict[str, str] = {
+        expanded: List[str] = []
+        for s in (preferred_sources or []):
+            if s == "x":
+                expanded.extend(["x_home", "x_search"])
+            elif s:
+                expanded.append(s)
+
+        base_filters: Dict[str, str] = {
             "select": "*",
             "jev_evaluated": "eq.1",
             "jev_category": "neq.NOISE",
             "jev_hype_prob": "lt.72",
+            "jev_score": f"gte.{round(float(min_jev_score), 1)}",
             "zh_translated": "eq.0",
             "order": "jev_score.desc,signal_score.desc",
-            "limit": str(limit),
         }
-        if preferred_sources:
-            expanded: List[str] = []
-            for s in preferred_sources:
-                if s == "x":
-                    expanded.extend(["x_home", "x_search"])
-                elif s:
-                    expanded.append(s)
-            if expanded:
-                quoted = ",".join(f'"{x}"' for x in expanded)
-                params["source"] = f"in.({quoted})"
-        resp = self._get_client().get(
-            self._rest_url("radar_items"),
-            params=params,
-            headers=self._headers(),
-        )
-        resp.raise_for_status()
-        return [self._normalize_row(r) for r in (resp.json() or [])]
+        if expanded:
+            quoted = ",".join(f'"{x}"' for x in expanded)
+            base_filters["source"] = f"in.({quoted})"
+
+        collected: List[Dict[str, Any]] = []
+        seen_ids: Set[str] = set()
+        clean_prio = [str(x).strip() for x in (priority_ids or []) if str(x).strip()][:100]
+
+        if clean_prio:
+            escaped = ",".join('"' + x.replace('"', '\\"') + '"' for x in clean_prio)
+            prio_params = dict(base_filters)
+            prio_params["id"] = f"in.({escaped})"
+            prio_params["limit"] = str(limit)
+            resp_p = self._get_client().get(
+                self._rest_url("radar_items"),
+                params=prio_params,
+                headers=self._headers(),
+            )
+            resp_p.raise_for_status()
+            for r in (resp_p.json() or []):
+                nr = self._normalize_row(r)
+                if nr.get("id") and nr["id"] not in seen_ids:
+                    seen_ids.add(nr["id"])
+                    collected.append(nr)
+
+        if len(collected) < limit:
+            fill_params = dict(base_filters)
+            fill_params["limit"] = str(limit)
+            resp = self._get_client().get(
+                self._rest_url("radar_items"),
+                params=fill_params,
+                headers=self._headers(),
+            )
+            resp.raise_for_status()
+            for r in (resp.json() or []):
+                if len(collected) >= limit:
+                    break
+                nr = self._normalize_row(r)
+                if nr.get("id") and nr["id"] not in seen_ids:
+                    seen_ids.add(nr["id"])
+                    collected.append(nr)
+
+        return collected[:limit]
 
     def get_items_by_ids(self, item_ids: List[str]) -> List[Dict[str, Any]]:
         clean = [str(i).strip() for i in (item_ids or []) if str(i).strip()]
@@ -274,6 +311,29 @@ class SupabaseRadarStore:
                 "zh_highlights": zh_highlights,
                 "zh_translated": 1,
             },
+        )
+        resp.raise_for_status()
+
+    def bulk_update_translations(
+        self, zh_map: Dict[str, Tuple[str, List[str]]]
+    ) -> None:
+        if not zh_map:
+            return
+        payload = [
+            {
+                "id": item_id,
+                "zh_title": zt,
+                "zh_highlights": zhl,
+            }
+            for item_id, (zt, zhl) in zh_map.items()
+            if item_id and zt
+        ]
+        if not payload:
+            return
+        resp = self._get_client().post(
+            self._rest_url("rpc/radar_bulk_update_translations"),
+            headers=self._headers(),
+            json={"p_translations": payload},
         )
         resp.raise_for_status()
 

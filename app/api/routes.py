@@ -71,6 +71,51 @@ def _get_media_client() -> httpx.AsyncClient:
 _verified_admin_tokens: Dict[str, float] = {}
 
 
+async def _verify_supabase_admin_token(tok: str) -> str:
+    now = time.time()
+    if _verified_admin_tokens.get(tok, 0.0) > now:
+        return "ok"
+    sb_url = get_supabase_url()
+    pub_key = get_supabase_publishable_key() or get_supabase_server_key()
+    if not sb_url or not pub_key:
+        return "unavailable"
+    async with httpx.AsyncClient(proxy=get_system_proxy(), timeout=10.0) as client:
+        resp = await client.get(
+            f"{sb_url}/auth/v1/user",
+            headers={"apikey": pub_key, "Authorization": f"Bearer {tok}"},
+        )
+    if resp.status_code != 200:
+        _verified_admin_tokens.pop(tok, None)
+        return "expired"
+    u_obj = resp.json() or {}
+    u_email = (u_obj.get("email") or "").lower()
+    if u_email != "xr110@viora.local.invalid" or not bool((u_obj.get("app_metadata") or {}).get("radar_admin")):
+        return "forbidden"
+    _verified_admin_tokens[tok] = now + 300.0
+    return "ok"
+
+
+async def _is_admin_authenticated(request: Request) -> bool:
+    expected_pwd = get_admin_password()
+    if expected_pwd:
+        provided = (request.headers.get("x-admin-password") or "").strip()
+        if not provided or not secrets.compare_digest(provided, expected_pwd):
+            return False
+
+    if IS_VERCEL or is_supabase_enabled():
+        tok = _extract_bearer_token(request) or (current_user_jwt.get() or "").strip()
+        if not tok:
+            return False
+        try:
+            status = await _verify_supabase_admin_token(tok)
+        except Exception:
+            return False
+        if status != "ok":
+            return False
+        current_user_jwt.set(tok)
+    return True
+
+
 async def _require_translate_auth(request: Request) -> None:
     expected_pwd = get_admin_password()
     if expected_pwd:
@@ -85,25 +130,13 @@ async def _require_translate_auth(request: Request) -> None:
             raise HTTPException(status_code=401, detail="AUTH_REQUIRED: Admin sign-in required")
         current_user_jwt.set(tok)
 
-        now = time.time()
-        if _verified_admin_tokens.get(tok, 0.0) <= now:
-            sb_url = get_supabase_url()
-            pub_key = get_supabase_publishable_key() or get_supabase_server_key()
-            if not sb_url or not pub_key:
-                raise HTTPException(status_code=503, detail="Auth service unavailable")
-            async with httpx.AsyncClient(proxy=get_system_proxy(), timeout=10.0) as client:
-                resp = await client.get(
-                    f"{sb_url}/auth/v1/user",
-                    headers={"apikey": pub_key, "Authorization": f"Bearer {tok}"},
-                )
-            if resp.status_code != 200:
-                _verified_admin_tokens.pop(tok, None)
-                raise HTTPException(status_code=401, detail="AUTH_REQUIRED: Session expired")
-            u_obj = resp.json() or {}
-            u_email = (u_obj.get("email") or "").lower()
-            if u_email != "xr110@viora.local.invalid" or not bool((u_obj.get("app_metadata") or {}).get("radar_admin")):
-                raise HTTPException(status_code=403, detail="该账号无管理员权限")
-            _verified_admin_tokens[tok] = now + 300.0
+        status = await _verify_supabase_admin_token(tok)
+        if status == "unavailable":
+            raise HTTPException(status_code=503, detail="Auth service unavailable")
+        if status == "expired":
+            raise HTTPException(status_code=401, detail="AUTH_REQUIRED: Session expired")
+        if status == "forbidden":
+            raise HTTPException(status_code=403, detail="该账号无管理员权限")
 
 
 class AuthLoginRequest(BaseModel):
@@ -241,7 +274,8 @@ async def list_items(
 
 
 @router.post("/scan")
-async def run_scan(req: ScanRequest) -> Dict[str, Any]:
+async def run_scan(req: ScanRequest, request: Request) -> Dict[str, Any]:
+    is_admin = await _is_admin_authenticated(request)
     if is_supabase_enabled():
         supabase_store.sync_runtime_settings(force=False)
     t0 = time.time()
@@ -327,6 +361,28 @@ async def run_scan(req: ScanRequest) -> Dict[str, Any]:
         if cat == "NOISE" or hype >= 75.0:
             noise_filtered += 1
 
+    zh_distilled_count = 0
+    if is_admin and (time.time() - t0) < 44.0:
+        fresh_high_ids = [
+            iid
+            for iid, (cat, _play, jscore, hype) in judged_map.items()
+            if cat != "NOISE" and hype < 72.0 and jscore >= 70.0
+        ]
+        to_translate = radar_db.get_untranslated_approved(
+            limit=16,
+            preferred_sources=list(enabled),
+            min_jev_score=70.0,
+            priority_ids=fresh_high_ids,
+        )
+        if to_translate:
+            zh_map = await jev_judge.translate_and_distill_batch(
+                to_translate,
+                model_override=req.translate_model or "deepseek/deepseek-v4-flash",
+            )
+            if zh_map:
+                radar_db.bulk_update_translations(zh_map)
+                zh_distilled_count = len(zh_map)
+
     elapsed = round(time.time() - t0, 1)
     latest_view = radar_db.query_items(page=1, page_size=1)
     return {
@@ -340,7 +396,8 @@ async def run_scan(req: ScanRequest) -> Dict[str, Any]:
         "jev_judged_new": new_judged_count,
         "jev_judged_backlog": max(0, len(judged_map) - new_judged_count),
         "noise_filtered": noise_filtered,
-        "zh_distilled": 0,
+        "zh_distilled": zh_distilled_count,
+        "admin_auto_translated": bool(is_admin),
         "source_counts": latest_view["source_counts"],
     }
 
@@ -365,10 +422,12 @@ async def manual_translate_items(req: TranslateRequest) -> Dict[str, Any]:
     zh_map = await jev_judge.translate_and_distill_batch(
         items, model_override="deepseek/deepseek-v4-flash"
     )
-    results: Dict[str, Any] = {}
-    for item_id, (zt, zhl) in zh_map.items():
-        radar_db.update_translation(item_id, zt, zhl)
-        results[item_id] = {"zh_title": zt, "zh_highlights": zhl}
+    if zh_map:
+        radar_db.bulk_update_translations(zh_map)
+    results: Dict[str, Any] = {
+        item_id: {"zh_title": zt, "zh_highlights": zhl}
+        for item_id, (zt, zhl) in zh_map.items()
+    }
 
     return {
         "ok": True,

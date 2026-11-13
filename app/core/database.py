@@ -292,10 +292,19 @@ class RadarDatabase:
             conn.close()
 
     def get_untranslated_approved(
-        self, limit: int = 24, preferred_sources: Optional[List[str]] = None
+        self,
+        limit: int = 16,
+        preferred_sources: Optional[List[str]] = None,
+        min_jev_score: float = 70.0,
+        priority_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         if self._use_cloud():
-            return supabase_store.get_untranslated_approved(limit=limit, preferred_sources=preferred_sources)
+            return supabase_store.get_untranslated_approved(
+                limit=limit,
+                preferred_sources=preferred_sources,
+                min_jev_score=min_jev_score,
+                priority_ids=priority_ids,
+            )
         self.ensure_init()
         conn = self._connect()
         try:
@@ -303,36 +312,38 @@ class RadarDatabase:
             for s in (preferred_sources or []):
                 if s == "x":
                     expanded.extend(["x_home", "x_search"])
-                else:
+                elif s:
                     expanded.append(s)
+
+            clean_prio = [str(pid).strip() for pid in (priority_ids or []) if str(pid).strip()][:100]
+            order_parts: List[str] = []
+            params: List[Any] = [float(min_jev_score)]
+
+            if clean_prio:
+                prio_ph = ",".join("?" for _ in clean_prio)
+                order_parts.append(f"CASE WHEN id IN ({prio_ph}) THEN 0 ELSE 1 END")
+                params.extend(clean_prio)
             if expanded:
-                placeholders = ",".join("?" for _ in expanded)
-                cur = conn.execute(
-                    f"""
-                    SELECT * FROM items
-                    WHERE jev_evaluated = 1
-                      AND jev_category != 'NOISE'
-                      AND jev_hype_prob < 72.0
-                      AND zh_translated = 0
-                    ORDER BY CASE WHEN source IN ({placeholders}) THEN 0 ELSE 1 END,
-                             jev_score DESC, signal_score DESC
-                    LIMIT ?
-                    """,
-                    (*expanded, limit),
-                )
-            else:
-                cur = conn.execute(
-                    """
-                    SELECT * FROM items
-                    WHERE jev_evaluated = 1
-                      AND jev_category != 'NOISE'
-                      AND jev_hype_prob < 72.0
-                      AND zh_translated = 0
-                    ORDER BY jev_score DESC, signal_score DESC
-                    LIMIT ?
-                    """,
-                    (limit,),
-                )
+                src_ph = ",".join("?" for _ in expanded)
+                order_parts.append(f"CASE WHEN source IN ({src_ph}) THEN 0 ELSE 1 END")
+                params.extend(expanded)
+
+            order_parts.extend(["jev_score DESC", "signal_score DESC"])
+            params.append(limit)
+
+            cur = conn.execute(
+                f"""
+                SELECT * FROM items
+                WHERE jev_evaluated = 1
+                  AND jev_category != 'NOISE'
+                  AND jev_hype_prob < 72.0
+                  AND jev_score >= ?
+                  AND zh_translated = 0
+                ORDER BY {', '.join(order_parts)}
+                LIMIT ?
+                """,
+                tuple(params),
+            )
             return [self._row_to_dict(r) for r in cur.fetchall()]
         finally:
             conn.close()
@@ -431,6 +442,35 @@ class RadarDatabase:
                     WHERE id = ?
                     """,
                     (zh_title, json.dumps(zh_highlights, ensure_ascii=False), item_id),
+                )
+        finally:
+            conn.close()
+
+    def bulk_update_translations(
+        self, zh_map: Dict[str, Tuple[str, List[str]]]
+    ) -> None:
+        if not zh_map:
+            return
+        if self._use_cloud():
+            supabase_store.bulk_update_translations(zh_map)
+            return
+        self.ensure_init()
+        conn = self._connect()
+        try:
+            with conn:
+                conn.executemany(
+                    """
+                    UPDATE items
+                    SET zh_title = ?,
+                        zh_highlights = ?,
+                        zh_translated = 1
+                    WHERE id = ?
+                    """,
+                    [
+                        (zt, json.dumps(zhl, ensure_ascii=False), item_id)
+                        for item_id, (zt, zhl) in zh_map.items()
+                        if item_id and zt
+                    ],
                 )
         finally:
             conn.close()
