@@ -54,6 +54,7 @@ const I18N = {
     btnTrPageEmpty: "🌐 翻译本页",
     btnTrPageAllDone: "✓ 本页已全译",
     btnTrPageCount: (n) => `🌐 翻译本页 (${n}条)`,
+    btnTrTop10: "🌐 翻译前10页",
     btnTranslating: "⏳ 翻译中...",
     btnCardTr: "🌐 译",
     btnCardTrTitle: "用 DeepSeek 提炼为中文",
@@ -143,6 +144,7 @@ const I18N = {
     btnTrPageEmpty: "🌐 Translate Page",
     btnTrPageAllDone: "✓ Page Translated",
     btnTrPageCount: (n) => `🌐 Translate Page (${n})`,
+    btnTrTop10: "🌐 Translate Top 10 Pages",
     btnTranslating: "⏳ Translating...",
     btnCardTr: "🌐 ZH",
     btnCardTrTitle: "Translate into Chinese via DeepSeek",
@@ -322,12 +324,27 @@ async function buildApiHeaders() {
   return h;
 }
 
-async function apiPost(url, bodyObj) {
-  let res = await fetch(url, {
-    method: "POST",
-    headers: await buildApiHeaders(),
-    body: JSON.stringify(bodyObj || {}),
-  });
+async function apiPost(url, bodyObj, timeoutMs = 65000) {
+  const _fetchOnce = async () => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      return await fetch(url, {
+        method: "POST",
+        headers: await buildApiHeaders(),
+        body: JSON.stringify(bodyObj || {}),
+        signal: ctrl.signal,
+      });
+    } catch (err) {
+      if (err && err.name === "AbortError") {
+        throw new Error(state.uiLang === "en" ? `Request timed out (${Math.round(timeoutMs / 1000)}s)` : `请求超时 (${Math.round(timeoutMs / 1000)}秒)`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  let res = await _fetchOnce();
   if (res.status === 401) {
     const errBody = await res.text();
     if (errBody.includes("AUTH_REQUIRED")) {
@@ -346,11 +363,7 @@ async function apiPost(url, bodyObj) {
       }
       localStorage.setItem("ai_radar_admin_pwd", entered.trim());
     }
-    res = await fetch(url, {
-      method: "POST",
-      headers: await buildApiHeaders(),
-      body: JSON.stringify(bodyObj || {}),
-    });
+    res = await _fetchOnce();
   }
   if (!res.ok) {
     const errText = await res.text();
@@ -631,7 +644,7 @@ function renderCard(it) {
         <span class="video-pill">${esc(dict.videoPill)}</span>
         <video
           controls
-          preload="metadata"
+          preload="none"
           playsinline
           webkit-playsinline
           poster="${esc(proxiedImg)}"
@@ -752,6 +765,151 @@ async function translateItemsByIds(ids, triggerBtn) {
   }
 }
 
+let _batchTranslating = false;
+
+async function translateTopPages(maxPages, triggerBtn, opts = {}) {
+  if (_batchTranslating) return;
+  const dict = t();
+  const log = document.getElementById("scan-log");
+  const checked = getCheckedSources();
+  if (!state.starredOnly && checked.length === 0) {
+    if (!opts.silentIfDone) {
+      log.textContent = state.uiLang === "en" ? "Select at least 1 source first." : "请先勾选至少 1 个数据源。";
+    }
+    return;
+  }
+
+  _batchTranslating = true;
+  const oldLabel = triggerBtn ? triggerBtn.textContent : "";
+  if (triggerBtn) {
+    triggerBtn.disabled = true;
+    triggerBtn.textContent = dict.btnTranslating;
+  }
+
+  try {
+    const params = new URLSearchParams();
+    if (state.starredOnly) {
+      params.set("starred", "true");
+      params.set("source", "all");
+    } else {
+      params.set("source", checked.length === 5 ? "all" : checked.join(","));
+    }
+    params.set("category", state.category);
+    if (state.readyOnly) params.set("playability", "READY_NOW");
+    if (state.videoOnly) params.set("has_video", "true");
+    if (state.q) params.set("q", state.q);
+    params.set("sort", state.sort);
+    params.set("hours", String(state.hours));
+    params.set("page", "1");
+    params.set("page_size", String(maxPages * (state.pageSize || 10)));
+
+    const res = await fetch(`/api/items?${params.toString()}`);
+    const data = await res.json();
+    const allItems = data.items || [];
+    const untransIds = allItems
+      .filter((x) => !(x.zh_translated && x.zh_title))
+      .map((x) => x.id);
+
+    if (!untransIds.length) {
+      if (!opts.silentIfDone) {
+        log.textContent =
+          state.uiLang === "en"
+            ? `✓ All items in Top ${maxPages} pages are already translated!`
+            : `✓ 当前排序前 ${maxPages} 页已全部翻译完成！`;
+      }
+      return;
+    }
+
+    const batchSize = 20;
+    const chunks = [];
+    for (let i = 0; i < untransIds.length; i += batchSize) {
+      chunks.push(untransIds.slice(i, i + batchSize));
+    }
+
+    let doneCount = 0;
+    let totalTranslated = 0;
+    let failedBatches = 0;
+    let authFatalErr = null;
+    let nextIdx = 0;
+    const totalBatches = chunks.length;
+
+    const updateProgressUI = () => {
+      const progressText =
+        state.uiLang === "en"
+          ? `⏳ Top ${maxPages}p (${doneCount}/${untransIds.length})...`
+          : `⏳ 极速翻译 (${doneCount}/${untransIds.length})...`;
+      if (triggerBtn) triggerBtn.textContent = progressText;
+      log.textContent =
+        state.uiLang === "en"
+          ? `Fast-translating Top ${maxPages} pages (2x parallel): ${doneCount}/${untransIds.length} items (${totalBatches} batches)...`
+          : `正在极速并发翻译前 ${maxPages} 页：已完成 ${doneCount}/${untransIds.length} 条（共 ${totalBatches} 批，双路并行）...`;
+    };
+    updateProgressUI();
+
+    const worker = async () => {
+      while (nextIdx < chunks.length && !authFatalErr) {
+        const idx = nextIdx++;
+        const chunk = chunks[idx];
+        let d;
+        try {
+          d = await apiPost("/api/translate", { ids: chunk }, 45000);
+        } catch (batchErr) {
+          const msg = String(batchErr?.message || "");
+          if (msg.includes("未登录") || msg.includes("口令") || msg.includes("Sign-in") || msg.includes("401") || msg.includes("403")) {
+            authFatalErr = batchErr;
+            return;
+          }
+          failedBatches += 1;
+          doneCount += chunk.length;
+          updateProgressUI();
+          continue;
+        }
+
+        const map = d.results || {};
+        totalTranslated += d.translated || 0;
+        doneCount += chunk.length;
+        updateProgressUI();
+
+        let currentPageChanged = false;
+        for (const it of state.currentItems) {
+          if (map[it.id]) {
+            it.zh_title = map[it.id].zh_title;
+            it.zh_highlights = map[it.id].zh_highlights;
+            it.zh_translated = 1;
+            state.cardModeOverrides[it.id] = "zh";
+            currentPageChanged = true;
+          }
+        }
+        if (currentPageChanged) {
+          renderCardsFromState();
+        }
+      }
+    };
+
+    const concurrency = Math.min(2, chunks.length);
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    if (authFatalErr) throw authFatalErr;
+
+    const failNoteZh = failedBatches > 0 ? `（有 ${failedBatches} 批超时跳过，下次扫描自动补齐）` : "";
+    const failNoteEn = failedBatches > 0 ? ` (${failedBatches} batch(es) skipped on timeout)` : "";
+    log.textContent =
+      state.uiLang === "en"
+        ? `✅ Finished translating ${totalTranslated} item(s) across Top ${maxPages} pages!${failNoteEn}`
+        : `✅ 前 ${maxPages} 页批量翻译完成，本次共入库 ${totalTranslated} 条中文提炼！${failNoteZh}`;
+  } catch (e) {
+    log.textContent =
+      state.uiLang === "en"
+        ? `❌ Batch translation stopped: ${e.message}`
+        : `❌ 批量翻译中断: ${e.message}`;
+  } finally {
+    _batchTranslating = false;
+    if (triggerBtn) {
+      triggerBtn.disabled = false;
+      triggerBtn.textContent = oldLabel || dict.btnTrTop10;
+    }
+  }
+}
+
 async function triggerScan() {
   const dict = t();
   const btn = document.getElementById("btn-scan");
@@ -789,6 +947,10 @@ async function triggerScan() {
     updateCounts(d.source_counts);
     state.page = 1;
     await loadItems();
+    // Auto-continue translating remaining untranslated items across Top 10 pages in small Vercel-safe batches
+    if (hasAdmin || d.admin_auto_translated) {
+      translateTopPages(10, null, { silentIfDone: true });
+    }
   } catch (e) {
     log.textContent = state.uiLang === "en" ? `❌ Scan failed: ${e.message}` : `❌ 扫描出错: ${e.message}`;
   } finally {

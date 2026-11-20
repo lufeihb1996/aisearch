@@ -181,7 +181,125 @@ class ExternalIngestors:
 
     async def fetch_reddit_communities(self) -> List[Dict[str, Any]]:
         """
-        Single combined RSS request for r/LocalLLaMA + r/StableDiffusion + r/comfyui to avoid HTTP 429!
+        Fetch recent posts from r/LocalLLaMA, r/StableDiffusion, and r/comfyui.
+        Primary: Arctic Shift public Reddit archive API (avoids Reddit's aggressive 403/404/429 on proxy IPs).
+        Fallback: Reddit combined Atom RSS feed.
+        """
+        items = await self._fetch_reddit_via_arctic_shift()
+        if items:
+            return items
+        return await self._fetch_reddit_via_rss()
+
+    async def _fetch_reddit_via_arctic_shift(self, limit_per_sub: int = 12, max_total: int = 25) -> List[Dict[str, Any]]:
+        proxy = get_system_proxy()
+        subreddits = ("LocalLLaMA", "StableDiffusion", "comfyui")
+        items: List[Dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        url_re = re.compile(r"https?://[^\s\)\]>\"']+")
+
+        try:
+            async with httpx.AsyncClient(proxy=proxy, follow_redirects=True, timeout=9.0) as client:
+                resps = await asyncio.gather(
+                    *[
+                        client.get(
+                            "https://arctic-shift.photon-reddit.com/api/posts/search",
+                            params={"subreddit": sub, "limit": limit_per_sub, "sort": "desc"},
+                            headers={"user-agent": "AI-Tech-Radar/1.0"},
+                        )
+                        for sub in subreddits
+                    ],
+                    return_exceptions=True,
+                )
+                for sub, resp in zip(subreddits, resps):
+                    if isinstance(resp, Exception):
+                        logger.warning(f"Arctic Shift r/{sub} error: {resp}")
+                        continue
+                    if resp.status_code != 200:
+                        logger.warning(f"Arctic Shift r/{sub} HTTP {resp.status_code}")
+                        continue
+                    for post in resp.json().get("data", []) or []:
+                        pid = str(post.get("id") or "").strip()
+                        if not pid or pid in seen_ids:
+                            continue
+                        title = html.unescape(str(post.get("title") or "")).strip()
+                        if not title:
+                            continue
+                        selftext = html.unescape(str(post.get("selftext") or "")).strip()
+                        if selftext in ("[removed]", "[deleted]"):
+                            continue
+
+                        seen_ids.add(pid)
+                        sub_name = str(post.get("subreddit") or sub)
+                        author = str(post.get("author") or "redditor").strip()
+                        permalink = str(post.get("permalink") or "").strip()
+                        post_url = f"https://www.reddit.com{permalink}" if permalink.startswith("/") else f"https://www.reddit.com/r/{sub_name}/comments/{pid}/"
+                        ext_url = str(post.get("url") or "").strip()
+
+                        # Collect external project links from post target URL + selftext
+                        candidate_urls: List[str] = []
+                        if ext_url.startswith(("http://", "https://")):
+                            candidate_urls.append(ext_url)
+                        if selftext:
+                            candidate_urls.extend(url_re.findall(selftext))
+
+                        links: List[Dict[str, str]] = []
+                        seen_u: set[str] = set()
+                        for u in candidate_urls:
+                            u_clean = u.rstrip(".,;:!?")
+                            info = classify_project_link(u_clean)
+                            if info and info["url"] not in seen_u:
+                                seen_u.add(info["url"])
+                                links.append(info)
+
+                        # Pick best preview / thumbnail image
+                        img_url = ""
+                        preview_imgs = ((post.get("preview") or {}).get("images") or [])
+                        if preview_imgs and isinstance(preview_imgs[0], dict):
+                            src_url = ((preview_imgs[0].get("source") or {}).get("url") or "").strip()
+                            if src_url.startswith(("http://", "https://")):
+                                img_url = html.unescape(src_url)
+                        if not img_url:
+                            thumb = str(post.get("thumbnail") or "").strip()
+                            if thumb.startswith(("http://", "https://")):
+                                img_url = html.unescape(thumb)
+
+                        clean_body = re.sub(r"\s+", " ", selftext).strip()
+                        full_text = f"{title}\n{clean_body}".strip()[:1600]
+                        created_ts = int(post.get("created_utc") or time.time())
+
+                        it: Dict[str, Any] = {
+                            "id": f"rd:t3_{pid}",
+                            "source": "reddit",
+                            "source_badge": f"Reddit r/{sub_name}",
+                            "author": author.removeprefix("/u/"),
+                            "author_handle": f"/u/{author.removeprefix('/u/')}",
+                            "author_followers": 0,
+                            "raw_title": title[:140],
+                            "raw_text": full_text,
+                            "original_url": post_url,
+                            "project_links": links,
+                            "video_url": "",
+                            "image_url": img_url,
+                            "metrics": {
+                                "subreddit": sub_name,
+                                "score": int(post.get("score") or 0),
+                                "comments": int(post.get("num_comments") or 0),
+                            },
+                            "created_at_ts": created_ts,
+                        }
+                        it["canonical_key"] = derive_canonical_key(it["id"], links)
+                        it["signal_score"] = compute_signal_score(it)
+                        items.append(it)
+        except Exception as e:
+            logger.warning(f"Arctic Shift fetch error: {e}")
+
+        # Prioritize posts with concrete project links & higher signal score, then recency
+        items.sort(key=lambda x: (x.get("signal_score", 0), x.get("created_at_ts", 0)), reverse=True)
+        return items[:max_total]
+
+    async def _fetch_reddit_via_rss(self) -> List[Dict[str, Any]]:
+        """
+        Fallback: Single combined RSS request for r/LocalLLaMA + r/StableDiffusion + r/comfyui.
         """
         proxy = get_system_proxy()
         items: List[Dict[str, Any]] = []

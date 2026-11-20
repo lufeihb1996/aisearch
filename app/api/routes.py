@@ -412,7 +412,7 @@ async def toggle_star_item(req: StarRequest) -> Dict[str, Any]:
 async def manual_translate_items(req: TranslateRequest) -> Dict[str, Any]:
     if is_supabase_enabled():
         supabase_store.sync_runtime_settings(force=False)
-    clean_ids = [str(x).strip() for x in (req.ids or []) if str(x).strip()][:20]
+    clean_ids = [str(x).strip() for x in (req.ids or []) if str(x).strip()][:24]
     if not clean_ids:
         return {"ok": True, "translated": 0, "results": {}}
     items = radar_db.get_items_by_ids(clean_ids)
